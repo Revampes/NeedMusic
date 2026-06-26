@@ -1,0 +1,23 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>NeedMusic — Dynamic Island</title>
+    <style>
+      *,*::before,*::after{box-sizing:border-box;margin:0;padding:0}
+      html{height:100%;overflow:hidden;background:transparent!important;-webkit-user-select:none}
+      body{height:100%;overflow:hidden;background:transparent;font-family:"Inter","Segoe UI",-apple-system,sans-serif;-webkit-font-smoothing:antialiased;user-select:none}
+    </style>
+    <script>
+      // Suppress the default WebView2 / Edge context menu.
+      document.addEventListener('contextmenu', e => e.preventDefault());
+      document.addEventListener('dragover', e => e.preventDefault());
+      document.addEventListener('drop', e => e.preventDefault());
+    </script>
+  </head>
+  <body>
+    <div id="root"></div>
+    <script type="module" src="/src/dynamic-island-main.tsx"></script>
+  </body>
+</html>

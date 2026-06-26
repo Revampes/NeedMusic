@@ -1,0 +1,23 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>NeedMusic</title>
+    <style>
+      *,*::before,*::after{box-sizing:border-box;margin:0;padding:0}
+      html,body{height:100%;overflow:hidden;background:transparent}
+    </style>
+    <script>
+      // Suppress the default WebView2 / Edge context menu and branding.
+      document.addEventListener('contextmenu', e => e.preventDefault());
+      // Prevent drag-and-drop from showing Edge UI.
+      document.addEventListener('dragover', e => e.preventDefault());
+      document.addEventListener('drop', e => e.preventDefault());
+    </script>
+  </head>
+  <body>
+    <div id="root"></div>
+    <script type="module" src="/src/main.tsx"></script>
+  </body>
+</html>
