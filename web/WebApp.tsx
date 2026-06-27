@@ -3,14 +3,14 @@ import { PlaybackEngine, PlaybackState, RepeatMode } from "@core/services/Playba
 import type { ITrack, PlayerState } from "@core/interfaces";
 import { BackgroundEngine } from "@core/utils/BackgroundEngine";
 import ProgressBar from "@ui/components/ProgressBar";
-import PlaylistsView from "@ui/components/PlaylistsView";
 import QueuePanel from "@ui/components/QueuePanel";
 import MarqueeText from "@ui/components/MarqueeText";
 import {
-  IconLibrary, IconHeart, IconHeartFill, IconPlaylist,
+  IconLibrary, IconHeart, IconHeartFill,
   IconMusic, IconImage, IconPrevious, IconPlay, IconPause, IconNext, IconStop,
   IconRepeatOff, IconRepeat, IconRepeatOne, IconShuffle, IconVolume,
   IconClock, IconPlus, IconClose, IconGlobe, IconSettings, IconUpload, IconAlert,
+  IconPlaylist,
 } from "@ui/components/Icons";
 import { initWebPlayer, webTrackStore, toPlayableTrack, TrackData } from "./bootstrap";
 import "../src/ui/styles/design-tokens.css";
@@ -259,7 +259,7 @@ const WebApp: React.FC = () => {
             {activeTab === "Online" ? (
               <WebOnlineSearch onPlayTrack={handlePlayTrack} />
             ) : activeTab === "Playlists" ? (
-              <PlaylistsView tracks={[]} />
+              <WebPlaylistsView tracks={tracks} onPlay={handlePlayTrack} />
             ) : activeTab === "Settings" ? (
               <WebSettingsView />
             ) : (
@@ -433,142 +433,147 @@ interface BilibiliItem {
   cover_url: string;
 }
 
-const WebOnlineSearch: React.FC<{ onPlayTrack: (td: TrackData) => void }> = ({ onPlayTrack }) => {
-  const [query, setQuery] = useState("");
-  const [results, setResults] = useState<BilibiliItem[]>([]);
-  const [loading, setLoading] = useState(false);
-  const [error, setError] = useState("");
+const WebOnlineSearch: React.FC<{ onPlayTrack: (td: TrackData) => void }> = () => {
+  return (
+    <div style={{ display: "flex", alignItems: "center", justifyContent: "center", height: "100%", flexDirection: "column", gap: 16, padding: 32, textAlign: "center" }}>
+      <IconGlobe size={48} style={{ color: "#444" }} />
+      <h3 style={{ color: "#888" }}>Online Search</h3>
+      <p style={{ color: "#555", maxWidth: 400, lineHeight: 1.6, fontSize: 13 }}>
+        Bilibili search requires a backend server to proxy API requests (CORS + Referer headers).
+        The desktop app handles this via its built-in Rust backend.
+      </p>
+      <p style={{ color: "#555", maxWidth: 400, lineHeight: 1.6, fontSize: 13 }}>
+        Use the <strong style={{ color: "#e94560" }}>Import</strong> button in the sidebar
+        to play audio files directly from your device.
+      </p>
+    </div>
+  );
+};
 
-  const doSearch = useCallback(async () => {
-    if (!query.trim()) return;
-    setLoading(true);
-    setError("");
-    try {
-      const resp = await fetch(
-        `https://api.bilibili.com/x/web-interface/search/type?search_type=video&keyword=${encodeURIComponent(query)}`
-      );
-      const json = await resp.json();
-      if (json.code !== 0) throw new Error(json.message || "Search failed");
-      const items: BilibiliItem[] = (json.data?.result || []).map((r: any) => ({
-        bvid: r.bvid,
-        title: r.title?.replace(/<[^>]+>/g, "") ?? "Untitled",
-        author: r.author ?? "Unknown",
-        duration: r.duration ?? "0:00",
-        duration_secs: 0,
-        cover_url: r.pic ?? "",
-      }));
-      setResults(items);
-    } catch (e: any) {
-      setError(String(e));
-    } finally {
-      setLoading(false);
-    }
-  }, [query]);
+// ─── Web Playlists (localStorage-based, no Tauri DB) ──
 
-  const handlePlay = useCallback(async (item: BilibiliItem) => {
-    try {
-      // Try to get audio URL via a CORS-friendly Bilibili API.
-      const infoResp = await fetch(
-        `https://api.bilibili.com/x/web-interface/view?bvid=${item.bvid}`
-      );
-      const infoJson = await infoResp.json();
-      const cid = infoJson.data?.cid;
-      if (!cid) throw new Error("Could not get video cid");
+interface WebPlaylist {
+  id: string;
+  name: string;
+  trackIds: string[];
+}
 
-      const playResp = await fetch(
-        `https://api.bilibili.com/x/player/playurl?bvid=${item.bvid}&cid=${cid}&qn=0&fnval=16`
-      );
-      const playJson = await playResp.json();
-      const audioUrl = playJson.data?.dash?.audio?.[0]?.baseUrl
-        || playJson.data?.dash?.audio?.[0]?.base_url;
+function loadPlaylists(): WebPlaylist[] {
+  try { return JSON.parse(localStorage.getItem("needmusic:playlists") || "[]"); } catch { return []; }
+}
+function savePlaylists(pl: WebPlaylist[]): void {
+  localStorage.setItem("needmusic:playlists", JSON.stringify(pl));
+}
 
-      if (!audioUrl) throw new Error("No audio stream available");
+const WebPlaylistsView: React.FC<{ tracks: TrackData[]; onPlay: (t: TrackData) => void }> = ({ tracks, onPlay }) => {
+  const [playlists, setPlaylists] = useState<WebPlaylist[]>(loadPlaylists);
+  const [newName, setNewName] = useState("");
+  const [selected, setSelected] = useState<string | null>(null);
+  const [dragTrack, setDragTrack] = useState<string | null>(null);
 
-      const td: TrackData = {
-        id: `bl-${item.bvid}`,
-        title: item.title,
-        artist: item.author,
-        album: "Bilibili",
-        albumArtist: "",
-        durationSecs: item.duration_secs || 0,
-        trackNumber: null,
-        discNumber: null,
-        genre: "Online",
-        year: null,
-        codec: "m4a",
-        hasArtwork: !!item.cover_url,
-        dateAdded: new Date(),
-        isFavorite: false,
-        audioUrl,
-        artworkUrl: item.cover_url,
-        sourceName: `Bilibili: ${item.title}`,
-      };
-      onPlayTrack(td);
-    } catch (e: any) {
-      console.error("Play online failed:", e);
-      setError(String(e));
-    }
-  }, [onPlayTrack]);
+  const createPlaylist = () => {
+    const name = newName.trim() || "New Playlist";
+    const pl: WebPlaylist = { id: `pl-${Date.now()}`, name, trackIds: [] };
+    const updated = [...playlists, pl];
+    setPlaylists(updated); savePlaylists(updated); setNewName("");
+  };
+
+  const addToPlaylist = (plId: string, trackId: string) => {
+    const updated = playlists.map(p => p.id === plId ? { ...p, trackIds: [...p.trackIds.filter(id => id !== trackId), trackId] } : p);
+    setPlaylists(updated); savePlaylists(updated);
+  };
+
+  const removeFromPlaylist = (plId: string, trackId: string) => {
+    const updated = playlists.map(p => p.id === plId ? { ...p, trackIds: p.trackIds.filter(id => id !== trackId) } : p);
+    setPlaylists(updated); savePlaylists(updated);
+  };
+
+  const deletePlaylist = (plId: string) => {
+    const updated = playlists.filter(p => p.id !== plId);
+    setPlaylists(updated); savePlaylists(updated);
+    if (selected === plId) setSelected(null);
+  };
+
+  const sel = playlists.find(p => p.id === selected);
+  const selTracks = sel ? sel.trackIds.map(id => tracks.find(t => t.id === id)).filter(Boolean) as TrackData[] : [];
 
   return (
-    <div className="track-list" style={{ padding: 12 }}>
-      <div className="content-search-bar">
-        <input
-          className="search-input"
-          type="text"
-          placeholder="Search Bilibili..."
-          value={query}
-          onChange={(e) => setQuery(e.target.value)}
-          onKeyDown={(e) => e.key === "Enter" && doSearch()}
-        />
-        <button
-          onClick={doSearch}
-          disabled={loading}
-          style={{
-            padding: "6px 16px", background: "#e94560", color: "#fff",
-            border: "none", borderRadius: 4, cursor: "pointer", fontWeight: 600,
-          }}
-        >
-          {loading ? "..." : "Search"}
-        </button>
-      </div>
-      {error && (
-        <div style={{ color: "#e94560", padding: "8px 0", display: "flex", alignItems: "center", gap: 6 }}>
-          <IconAlert size={14} /> {error}
+    <div style={{ display: "flex", height: "100%" }}>
+      <div style={{ width: 200, borderRight: "1px solid #222", padding: 8, overflowY: "auto" }}>
+        <div style={{ display: "flex", gap: 4, marginBottom: 8 }}>
+          <input value={newName} onChange={e => setNewName(e.target.value)} placeholder="New playlist..."
+            style={{ flex: 1, padding: "4px 8px", background: "#1a1a1a", border: "1px solid #333", color: "#e0e0e0", borderRadius: 4, fontSize: 12 }}
+            onKeyDown={e => e.key === "Enter" && createPlaylist()} />
+          <button onClick={createPlaylist} style={{ padding: "4px 8px", background: "#e94560", color: "#fff", border: "none", borderRadius: 4, cursor: "pointer" }}><IconPlus size={12} /></button>
         </div>
-      )}
-      <div style={{ marginTop: 8 }}>
-        {results.map((item) => (
-          <div
-            key={item.bvid}
-            className="track-row"
-            onDoubleClick={() => handlePlay(item)}
-            style={{ cursor: "pointer" }}
-          >
-            <span className="col-fav">
-              {item.cover_url ? (
-                <img src={item.cover_url} alt="" style={{ width: 28, height: 28, borderRadius: 3, objectFit: "cover" }} referrerPolicy="no-referrer" />
-              ) : (
-                <IconMusic size={14} />
-              )}
-            </span>
-            <span className="col-title">
-              <MarqueeText>{item.title}</MarqueeText>
-            </span>
-            <span className="col-artist"><MarqueeText>{item.author}</MarqueeText></span>
-            <span className="col-album" />
-            <span className="col-dur">{item.duration}</span>
-            <span className="col-add" title="Play" onClick={(e) => { e.stopPropagation(); handlePlay(item); }}>
-              <IconPlay size={13} />
-            </span>
+        {playlists.map(pl => (
+          <div key={pl.id} onClick={() => setSelected(pl.id)}
+            style={{ padding: "6px 8px", cursor: "pointer", borderRadius: 4, display: "flex", justifyContent: "space-between", alignItems: "center", background: selected === pl.id ? "#e9456020" : "transparent", color: selected === pl.id ? "#e94560" : "#aaa", fontSize: 13 }}>
+            <span><IconPlaylist size={12} style={{ marginRight: 4 }} />{pl.name} ({pl.trackIds.length})</span>
+            <span onClick={e => { e.stopPropagation(); deletePlaylist(pl.id); }} style={{ cursor: "pointer", opacity: 0.5 }}><IconClose size={10} /></span>
           </div>
         ))}
-        {results.length === 0 && !loading && (
-          <div className="track-empty">Search for music on Bilibili.</div>
+      </div>
+      <div style={{ flex: 1, overflowY: "auto" }}>
+        {sel ? (
+          <>
+            <div style={{ padding: "8px 16px", borderBottom: "1px solid #222", display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+              <span style={{ fontWeight: 600 }}>{sel.name}</span>
+              <span style={{ color: "#666", fontSize: 12 }}>{sel.trackIds.length} tracks</span>
+            </div>
+            {selTracks.map(t => (
+              <div key={t.id} className="track-row" onDoubleClick={() => onPlay(t)} draggable onDragStart={() => setDragTrack(t.id)}>
+                <span className="col-title"><IconMusic size={12} style={{ marginRight: 4 }} />{t.title}</span>
+                <span className="col-artist">{t.artist}</span>
+                <span className="col-dur">{formatDuration(t.durationSecs)}</span>
+                <span className="col-remove" onClick={e => { e.stopPropagation(); removeFromPlaylist(sel.id, t.id); }}><IconClose size={12} /></span>
+              </div>
+            ))}
+            <div onDragOver={e => e.preventDefault()} onDrop={e => { e.preventDefault(); if (dragTrack) addToPlaylist(sel.id, dragTrack); setDragTrack(null); }}
+              style={{ margin: 8, padding: 24, border: "2px dashed #333", borderRadius: 8, textAlign: "center", color: "#555", fontSize: 12 }}>
+              Drop tracks here to add
+            </div>
+          </>
+        ) : (
+          <div style={{ display: "flex", alignItems: "center", justifyContent: "center", height: "100%", color: "#555" }}>
+            Select or create a playlist
+          </div>
         )}
       </div>
     </div>
   );
 };
+
+// ─── Mobile responsive styles ────────────────────────
+
+const mobileStyles = `
+@media (max-width: 768px) {
+  .app-layout { flex-direction: column !important; }
+  .icon-sidebar { flex-direction: row !important; width: 100% !important; height: auto !important; padding: 8px 0 !important; gap: 4px !important; justify-content: center !important; }
+  .icon-nav-item { padding: 8px !important; }
+  .main-area { width: 100% !important; }
+  .player-bar { flex-direction: column !important; padding: 8px !important; gap: 8px !important; height: auto !important; }
+  .player-left, .player-center, .player-right { width: 100% !important; justify-content: center !important; }
+  .player-controls { justify-content: center !important; }
+  .volume-slider { display: none !important; }
+  .player-track-details { max-width: 200px !important; }
+  .track-list-header { font-size: 11px !important; }
+  .track-row { font-size: 12px !important; }
+  .col-album, .col-artist { display: none !important; }
+  .col-dur { width: 40px !important; }
+  .content-search-bar { flex-wrap: wrap !important; }
+}
+@media (max-width: 480px) {
+  .player-metadata { display: none !important; }
+  .speed-select { display: none !important; }
+  .ctrl-btn { padding: 4px !important; }
+}
+`;
+
+if (typeof document !== "undefined") {
+  const styleEl = document.createElement("style");
+  styleEl.textContent = mobileStyles;
+  document.head.appendChild(styleEl);
+}
 
 export default WebApp;
