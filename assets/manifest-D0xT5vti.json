@@ -1,0 +1,9 @@
+{
+  "name": "NeedMusic",
+  "short_name": "NeedMusic",
+  "description": "A high-performance music player for the web",
+  "start_url": "/",
+  "display": "standalone",
+  "background_color": "#0a0a0a",
+  "theme_color": "#0a0a0a"
+}
