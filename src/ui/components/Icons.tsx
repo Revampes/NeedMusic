@@ -76,3 +76,4 @@ export const IconCheck     = mk("M20 6 9 17l-5-5");                             
 export const IconAlert     = mk("M10.29 3.86 1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z M12 9v4M12 17h.01"); // ❌ / generic alert
 export const IconHourglass = mk("M5 22h14M5 2h14M12 8v5l4 4 M17 2.5H7a2 2 0 0 0-2 2v2.17a2 2 0 0 0 .59 1.42L9 11.5l-3.41 3.41A2 2 0 0 0 5 16.33V19a2 2 0 0 0 2 2"); // ⏳
 export const IconGlobe     = mk("M12 22a10 10 0 1 0 0-20 10 10 0 0 0 0 20z M2 12h20 M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10z"); // 🌐
+export const IconUpload    = mk("M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4 M17 8l-5-5-5 5 M12 3v12"); // ⬆️
