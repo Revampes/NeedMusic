@@ -225,6 +225,11 @@ export class PlaybackEngine {
 
   async seek(seconds: number): Promise<void> {
     await this.audioOutput?.seek(seconds);
+    // Refresh Discord RPC so the progress bar reflects the new position.
+    const isPlaying = this._state === PlaybackState.Playing;
+    if (isPlaying || this._state === PlaybackState.Paused) {
+      this.syncDiscordPresence(isPlaying);
+    }
   }
 
   setVolume(volume: number): void {
@@ -393,6 +398,7 @@ export class PlaybackEngine {
         await this.seek(0);
         if (this._state === PlaybackState.Playing) {
           this.startProgressUpdates();
+          this.syncDiscordPresence(true);
         }
       } else {
         await this.next();
@@ -416,13 +422,17 @@ export class PlaybackEngine {
       return;
     }
 
+    const pos = this.getCurrentTime();
+    const dur = this.getDuration();
+    console.log("[DiscordRpc] syncPresence:", { title: track.title, isPlaying, pos: pos.toFixed(1), dur: dur.toFixed(1) });
+
     rpc.updatePresence({
       title: track.title,
       artist: track.artist,
       album: track.album,
       isPlaying,
-      positionSecs: this.getCurrentTime(),
-      durationSecs: this.getDuration(),
+      positionSecs: pos,
+      durationSecs: dur,
     });
   }
 

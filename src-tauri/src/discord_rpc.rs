@@ -36,8 +36,11 @@ pub struct DiscordRpcManager {
     app_id: String,
     /// Track whether we're currently connected.
     connected: Mutex<bool>,
-    /// When we last sent a heartbeat (ping) to Discord.
+    /// When we last sent a heartbeat (activity refresh) to Discord.
     last_heartbeat: Mutex<Instant>,
+    /// The last SET_ACTIVITY payload sent. Used to refresh presence
+    /// on heartbeat (Discord RPC doesn't support PING).
+    last_activity: Mutex<Option<Value>>,
 }
 
 /// Abstracts over platform-specific IPC transport.
@@ -83,6 +86,19 @@ fn ipc_write_all(conn: &mut IpcConnection, data: &[u8]) -> Result<(), String> {
     Ok(())
 }
 
+/// Truncate a string to at most `max_len` bytes, ensuring the cut
+/// lands on a valid UTF-8 character boundary (no mid-char panics).
+fn truncate_str(s: &str, max_len: usize) -> &str {
+    if s.len() <= max_len {
+        return s;
+    }
+    let mut end = max_len;
+    while end > 0 && !s.is_char_boundary(end) {
+        end -= 1;
+    }
+    &s[..end]
+}
+
 // ─── DiscordRpcManager ────────────────────────────────
 
 impl DiscordRpcManager {
@@ -93,11 +109,13 @@ impl DiscordRpcManager {
             app_id,
             connected: Mutex::new(false),
             last_heartbeat: Mutex::new(Instant::now()),
+            last_activity: Mutex::new(None),
         }
     }
 
     pub fn enable(&self) -> Result<(), String> {
-        *self.enabled.lock().map_err(|e| e.to_string())? = true;
+        // Recover from poisoned locks so a previous panic doesn't brick RPC permanently.
+        *self.enabled.lock().unwrap_or_else(|e| e.into_inner()) = true;
         match self.connect() {
             Ok(()) => {
                 eprintln!("[DiscordRpc] Connected successfully");
@@ -109,7 +127,7 @@ impl DiscordRpcManager {
             }
             Err(e) => {
                 // Rollback — don't leave enabled=true with no connection.
-                *self.enabled.lock().map_err(|e2| e2.to_string())? = false;
+                *self.enabled.lock().unwrap_or_else(|e| e.into_inner()) = false;
                 eprintln!("[DiscordRpc] Enable failed: {}", e);
                 Err(format!("Discord RPC: {}. Is Discord running?", e))
             }
@@ -117,7 +135,7 @@ impl DiscordRpcManager {
     }
 
     pub fn disable(&self) -> Result<(), String> {
-        let mut enabled = self.enabled.lock().map_err(|e| e.to_string())?;
+        let mut enabled = self.enabled.lock().unwrap_or_else(|e| e.into_inner());
         *enabled = false;
         drop(enabled);
         self.disconnect()
@@ -127,9 +145,11 @@ impl DiscordRpcManager {
         self.enabled.lock().ok().map(|e| *e).unwrap_or(false)
     }
 
-    /// Send a heartbeat (ping) to Discord to keep the pipe alive.
-    /// Should be called periodically (every ~10s) from the frontend
-    /// or from update_presence as a side-effect.
+    /// Send a heartbeat to Discord to keep the pipe alive.
+    /// Discord RPC does NOT support a "PING" command — instead we
+    /// re-send the last SET_ACTIVITY payload to refresh the presence.
+    /// Called periodically from the frontend and as a side-effect
+    /// of update_presence.
     pub fn heartbeat(&self) -> Result<(), String> {
         if !self.is_enabled() || !self.is_connected() {
             return Ok(());
@@ -137,20 +157,42 @@ impl DiscordRpcManager {
 
         // Check if enough time has passed since last heartbeat.
         {
-            let hb = self.last_heartbeat.lock().map_err(|e| e.to_string())?;
+            let hb = self.last_heartbeat.lock().unwrap_or_else(|e| e.into_inner());
             if hb.elapsed() < HEARTBEAT_INTERVAL {
                 return Ok(());
             }
         }
 
-        let payload = json!({
-            "cmd": "PING",
-            "args": {},
-            "nonce": format!("hb-{}", SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .unwrap_or_default()
-                .as_secs())
-        });
+        // Re-send the last activity to keep the presence alive.
+        let activity = self.last_activity.lock().unwrap_or_else(|e| e.into_inner()).clone();
+        let payload = match activity {
+            Some(act) => json!({
+                "cmd": "SET_ACTIVITY",
+                "args": {
+                    "pid": std::process::id(),
+                    "activity": act
+                },
+                "nonce": format!("hb-{}", SystemTime::now()
+                    .duration_since(UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_secs())
+            }),
+            // Fallback: send a minimal activity so the pipe stays alive.
+            None => json!({
+                "cmd": "SET_ACTIVITY",
+                "args": {
+                    "pid": std::process::id(),
+                    "activity": {
+                        "type": 2,
+                        "details": "NeedMusic"
+                    }
+                },
+                "nonce": format!("hb-{}", SystemTime::now()
+                    .duration_since(UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_secs())
+            }),
+        };
 
         match self.send_frame(1, &payload) {
             Ok(()) => {
@@ -195,8 +237,9 @@ impl DiscordRpcManager {
             .as_secs() as i64;
 
         let mut activity = json!({
-            "details": title,
-            "state": format!("by {}", artist),
+            "type": 2,
+            "details": "NeedMusic",
+            "state": format!("{}\nby {}", title, artist),
             "assets": {
                 "large_image": "needmusic_logo",
                 "large_text": album,
@@ -205,13 +248,27 @@ impl DiscordRpcManager {
             }
         });
 
-        if duration_secs > 0.0 && is_playing {
+        // Always send timestamps so the Discord bar reflects the current position,
+        // even after seeking while paused.
+        if duration_secs > 0.0 {
             let start_ts = now - (position_secs as i64);
-            let end_ts = start_ts + (duration_secs as i64);
+            let end_ts = if is_playing {
+                start_ts + (duration_secs as i64)
+            } else {
+                // Paused: still show the bar at the current position.
+                // Discord will show elapsed time increasing (limitation of
+                // the protocol), but the remaining time stays accurate.
+                now + (duration_secs as i64) - (position_secs as i64)
+            };
             activity["timestamps"] = json!({
                 "start": start_ts,
                 "end": end_ts
             });
+        }
+
+        // Store the activity for heartbeat reuse (Discord RPC doesn't support PING).
+        if let Ok(mut la) = self.last_activity.lock() {
+            *la = Some(activity.clone());
         }
 
         let payload = json!({
@@ -250,6 +307,10 @@ impl DiscordRpcManager {
     pub fn clear_presence(&self) -> Result<(), String> {
         if !self.is_connected() {
             return Ok(());
+        }
+        // Clear stored activity so heartbeat doesn't resurrect the presence.
+        if let Ok(mut la) = self.last_activity.lock() {
+            *la = None;
         }
         let now = SystemTime::now()
             .duration_since(UNIX_EPOCH)
@@ -304,17 +365,17 @@ impl DiscordRpcManager {
 
         // Read handshake response to confirm connection (with timeout).
         match Self::read_frame(&mut conn) {
-            Ok(resp) => eprintln!("[DiscordRpc] Handshake response: {}", &resp[..resp.len().min(200)]),
+            Ok(resp) => eprintln!("[DiscordRpc] Handshake response: {}", truncate_str(&resp, 200)),
             Err(e) => {
                 eprintln!("[DiscordRpc] Handshake read failed: {}", e);
                 return Err(format!("Handshake failed: {}. Is Discord running?", e));
             }
         }
 
-        let mut conn_guard = self.connection.lock().map_err(|e| e.to_string())?;
+        let mut conn_guard = self.connection.lock().unwrap_or_else(|e| e.into_inner());
         *conn_guard = Some(conn);
         drop(conn_guard);
-        *self.connected.lock().map_err(|e| e.to_string())? = true;
+        *self.connected.lock().unwrap_or_else(|e| e.into_inner()) = true;
 
         Ok(())
     }
@@ -330,12 +391,12 @@ impl DiscordRpcManager {
     }
 
     fn send_frame(&self, opcode: u32, payload: &Value) -> Result<(), String> {
-        let mut conn_guard = self.connection.lock().map_err(|e| e.to_string())?;
+        let mut conn_guard = self.connection.lock().unwrap_or_else(|e| e.into_inner());
         let conn = conn_guard.as_mut()
             .ok_or_else(|| "Not connected to Discord".to_string())?;
 
         let payload_str = payload.to_string();
-        eprintln!("[DiscordRpc] Sending: {}", &payload_str[..payload_str.len().min(300)]);
+        eprintln!("[DiscordRpc] Sending: {}", truncate_str(&payload_str, 300));
 
         let mut frame = Vec::new();
         frame.extend_from_slice(&opcode.to_le_bytes());
@@ -343,17 +404,33 @@ impl DiscordRpcManager {
         frame.extend_from_slice(payload_str.as_bytes());
         ipc_write_all(conn, &frame)?;
 
-        // Read response to keep pipe healthy.
-        match Self::read_frame(conn) {
-            Ok(resp) => {
-                eprintln!("[DiscordRpc] Response: {}", &resp[..resp.len().min(200)]);
-                Ok(())
+        // Clone the file handle so we can read the response without
+        // holding the connection lock. This prevents a blocked/slow
+        // read from stalling other operations (heartbeats, updates).
+        let read_conn = Self::clone_connection(conn);
+        drop(conn_guard);
+
+        // Response read is non-fatal: Discord responses can occasionally
+        // be delayed or dropped without the pipe being broken.
+        if let Some(mut rc) = read_conn {
+            match Self::read_frame(&mut rc) {
+                Ok(resp) => eprintln!("[DiscordRpc] Response: {}", truncate_str(&resp, 200)),
+                Err(e) => eprintln!("[DiscordRpc] Response read skipped (non-fatal): {}", e),
             }
-            Err(e) => {
-                eprintln!("[DiscordRpc] Response read failed (pipe may be closed): {}", e);
-                drop(conn_guard);
-                self.disconnect_inner();
-                Err(format!("Discord IPC lost: {}", e))
+        }
+        Ok(())
+    }
+
+    /// Clone the IPC connection handle for independent reading.
+    fn clone_connection(conn: &IpcConnection) -> Option<IpcConnection> {
+        match conn {
+            #[cfg(windows)]
+            IpcConnection::Windows(f) => {
+                f.try_clone().ok().map(IpcConnection::Windows)
+            }
+            #[cfg(not(windows))]
+            IpcConnection::Unix(s) => {
+                s.try_clone().ok().map(IpcConnection::Unix)
             }
         }
     }
