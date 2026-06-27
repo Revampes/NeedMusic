@@ -228,7 +228,6 @@ const WebApp: React.FC = () => {
       <div className="app-layout">
         <nav className="icon-sidebar">
           <div className={`icon-nav-item ${activeTab === "Tracks" ? "active" : ""}`} onClick={() => setActiveTab("Tracks")} title="Tracks"><IconLibrary size={18} /></div>
-          <div className={`icon-nav-item ${activeTab === "Online" ? "active" : ""}`} onClick={() => setActiveTab("Online")} title="Online"><IconGlobe size={18} /></div>
           <div className={`icon-nav-item ${activeTab === "Playlists" ? "active" : ""}`} onClick={() => setActiveTab("Playlists")} title="Playlists"><IconPlaylist size={18} /></div>
           <div className="icon-nav-spacer" />
           <div className={`icon-nav-item ${activeTab === "Settings" ? "active" : ""}`} onClick={() => setActiveTab("Settings")} title="Settings"><IconSettings size={18} /></div>
@@ -256,9 +255,7 @@ const WebApp: React.FC = () => {
             </div>
           )}
           <div className="content-area">
-            {activeTab === "Online" ? (
-              <WebOnlineSearch onPlayTrack={handlePlayTrack} />
-            ) : activeTab === "Playlists" ? (
+            {activeTab === "Playlists" ? (
               <WebPlaylistsView tracks={tracks} onPlay={handlePlayTrack} />
             ) : activeTab === "Settings" ? (
               <WebSettingsView />
@@ -421,34 +418,6 @@ function formatDuration(secs: number): string {
   const s = Math.floor(secs % 60);
   return `${m}:${s.toString().padStart(2, "0")}`;
 }
-
-// ─── Web Online Search ──────────────────────────────
-
-interface BilibiliItem {
-  bvid: string;
-  title: string;
-  author: string;
-  duration: string;
-  duration_secs: number;
-  cover_url: string;
-}
-
-const WebOnlineSearch: React.FC<{ onPlayTrack: (td: TrackData) => void }> = () => {
-  return (
-    <div style={{ display: "flex", alignItems: "center", justifyContent: "center", height: "100%", flexDirection: "column", gap: 16, padding: 32, textAlign: "center" }}>
-      <IconGlobe size={48} style={{ color: "#444" }} />
-      <h3 style={{ color: "#888" }}>Online Search</h3>
-      <p style={{ color: "#555", maxWidth: 400, lineHeight: 1.6, fontSize: 13 }}>
-        Bilibili search requires a backend server to proxy API requests (CORS + Referer headers).
-        The desktop app handles this via its built-in Rust backend.
-      </p>
-      <p style={{ color: "#555", maxWidth: 400, lineHeight: 1.6, fontSize: 13 }}>
-        Use the <strong style={{ color: "#e94560" }}>Import</strong> button in the sidebar
-        to play audio files directly from your device.
-      </p>
-    </div>
-  );
-};
 
 // ─── Web Playlists (localStorage-based, no Tauri DB) ──
 
