@@ -3,6 +3,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { DatabaseManager } from "@core/services/DatabaseManager";
 import { LibraryManager } from "@core/services/LibraryManager";
 import { DiscordRpcService } from "@core/services/DiscordRpcService";
+import { OnlineMusicService } from "@core/services/OnlineMusicService";
 import { Track } from "@core/models/Track";
 import { IconFolder, IconVolume, IconPalette, IconSettings, IconRocket, IconCheck, IconAlert } from "@ui/components/Icons";
 
@@ -31,6 +32,9 @@ const DEFAULTS: Settings = {
   dynIslandOpacity: "85",
   // Cache
   maxCacheMb: "500",
+  // Online Search
+  youtubeSearch: "false",
+  onlineDownloadPath: "",
 };
 
 const BACKGROUND_STYLES = [
@@ -47,6 +51,8 @@ const SettingsView: React.FC<Props> = ({ onTracksLoaded }) => {
   const [scanResult, setScanResult] = useState<{ type: "success" | "error"; text: string } | null>(null);
   const [cacheInfo, setCacheInfo] = useState<CacheInfo | null>(null);
   const [clearingCache, setClearingCache] = useState(false);
+  const [ytDlpAvailable, setYtDlpAvailable] = useState(false);
+  const [downloadPath, setDownloadPath] = useState("");
   const bgImageInputRef = useRef<HTMLInputElement>(null);
   const db = DatabaseManager.getInstance();
 
@@ -68,6 +74,27 @@ const SettingsView: React.FC<Props> = ({ onTracksLoaded }) => {
   }, []);
 
   useEffect(() => { loadCacheInfo(); }, [loadCacheInfo]);
+
+  // Check yt-dlp availability
+  useEffect(() => {
+    (async () => {
+      const avail = await OnlineMusicService.getInstance().isYtDlpAvailable();
+      setYtDlpAvailable(avail);
+    })();
+  }, []);
+
+  // Load download path
+  useEffect(() => {
+    (async () => {
+      let dir = await db.getSetting("onlineDownloadPath");
+      if (!dir) {
+        try {
+          dir = await invoke<string>("get_default_download_dir");
+        } catch { dir = ""; }
+      }
+      setDownloadPath(dir || "");
+    })();
+  }, [db]);
 
   const handleClearCache = useCallback(async () => {
     setClearingCache(true);
@@ -360,6 +387,90 @@ const SettingsView: React.FC<Props> = ({ onTracksLoaded }) => {
             <span style={{ fontSize: 11, color: "var(--text-tertiary)" }}>Auto-clear when exceeded</span>
           </label>
         </div>
+      </section>
+
+      {/* ── Online Search ── */}
+      <section><h3><IconRocket size={16} style={{ marginRight: 6 }} />Online Search</h3>
+        {/* Download Path */}
+        <label className="settings-row"><span>Download to</span></label>
+        <div style={{ display: "flex", gap: 8, marginTop: 4, marginBottom: 8 }}>
+          <input
+            className="settings-input"
+            style={{ flex: 1, fontSize: 12 }}
+            placeholder="e.g. C:\Users\user\Music\NeedMusic"
+            value={downloadPath}
+            onChange={e => setDownloadPath(e.target.value)}
+            onBlur={() => { if (downloadPath.trim()) save("onlineDownloadPath", downloadPath.trim()); }}
+          />
+          <button
+            className="settings-btn"
+            style={{ fontSize: 11, whiteSpace: "nowrap" }}
+            onClick={async () => {
+              try {
+                const def = await invoke<string>("get_default_download_dir");
+                setDownloadPath(def);
+                await save("onlineDownloadPath", def);
+              } catch { /* ignore */ }
+            }}
+          >
+            Reset Default
+          </button>
+        </div>
+        <div style={{ fontSize: 10, color: "var(--text-tertiary)", marginBottom: 12 }}>
+          Downloaded music from Bilibili & YouTube is saved here. Separate from your import folder.
+        </div>
+
+        <label className="settings-check">
+          <input
+            type="checkbox"
+            checked={settings.youtubeSearch === "true"}
+            onChange={async e => {
+              const val = e.target.checked ? "true" : "false";
+              await save("youtubeSearch", val);
+            }}
+            disabled={!ytDlpAvailable}
+          />
+          Enable YouTube search
+          <span style={{ fontSize: 10, color: "var(--text-tertiary)", marginLeft: 4 }}>
+            (audio only — requires yt-dlp)
+          </span>
+        </label>
+        {!ytDlpAvailable && (
+          <div style={{ fontSize: 12, color: "var(--text-warning)", marginTop: 6 }}>
+            yt-dlp is not installed.{" "}
+            <a
+              href="https://github.com/yt-dlp/yt-dlp"
+              target="_blank"
+              rel="noopener noreferrer"
+              style={{ color: "var(--accent-primary)" }}
+            >
+              Install yt-dlp
+            </a>
+            {" "}or run: <code>pip install yt-dlp</code>
+          </div>
+        )}
+        {settings.youtubeSearch === "true" && ytDlpAvailable && (
+          <div style={{ fontSize: 12, color: "var(--text-tertiary)", marginTop: 6 }}>
+            YouTube search is enabled. Results will appear alongside Bilibili when you search.
+            Downloads are audio-only (no video).
+          </div>
+        )}
+        {settings.youtubeSearch === "true" && (
+          <div style={{
+            fontSize: 11,
+            color: "var(--color-error)",
+            marginTop: 8,
+            padding: "8px 10px",
+            background: "rgba(233, 69, 96, 0.08)",
+            border: "1px solid rgba(233, 69, 96, 0.2)",
+            borderRadius: "var(--radius-sm)",
+            lineHeight: 1.5,
+          }}>
+            <strong>⚠ Use at your own risk.</strong> Downloading audio from YouTube may violate
+            YouTube's Terms of Service. This feature is provided for personal, educational use only.
+            The developers are not responsible for how you use it. Proceed at your own discretion.
+          </div>
+        )}
       </section>
     </div>
   );

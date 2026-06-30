@@ -16,7 +16,7 @@ pub use scanner::LibraryScanner;
 pub use concurrency::ConcurrencyGate;
 pub use audio::NativeAudioPlayer;
 pub use discord_rpc::DiscordRpcManager;
-pub use online::{OnlineTrackResult, OnlineSearchResult};
+pub use online::{OnlineTrackResult, OnlineSearchResult, CombinedSearchResult};
 
 pub struct AppState {
     pub scanner: Mutex<LibraryScanner>,
@@ -419,7 +419,26 @@ async fn heartbeat_discord_rpc(
     .map_err(|e| format!("Discord RPC heartbeat panicked: {}", e))?
 }
 
-// ─── Online / Bilibili Commands ─────────────────────────
+// ─── Default Download Directory ──────────────────────────
+
+/// Returns the user's Music folder as the default download location
+/// for online music (Bilibili, YouTube). Falls back to %APPDATA%/NeedMusic/Music.
+#[tauri::command]
+fn get_default_download_dir() -> Result<String, String> {
+    // Try the system Music folder first.
+    if let Ok(music) = std::env::var("USERPROFILE") {
+        let music_path = std::path::PathBuf::from(&music).join("Music").join("NeedMusic");
+        return Ok(music_path.to_string_lossy().to_string());
+    }
+    // Fallback to APPDATA.
+    if let Ok(appdata) = std::env::var("APPDATA") {
+        let fallback = std::path::PathBuf::from(&appdata).join("NeedMusic").join("Music");
+        return Ok(fallback.to_string_lossy().to_string());
+    }
+    Err("Cannot determine default download directory".to_string())
+}
+
+// ─── Online / Bilibili & YouTube Commands ────────────────
 
 #[tauri::command]
 async fn search_bilibili(query: String) -> Result<OnlineSearchResult, String> {
@@ -430,14 +449,43 @@ async fn search_bilibili(query: String) -> Result<OnlineSearchResult, String> {
 }
 
 #[tauri::command]
+async fn search_youtube(query: String) -> Result<OnlineSearchResult, String> {
+    let q = query.clone();
+    tokio::task::spawn_blocking(move || online::search_youtube(&q))
+        .await
+        .map_err(|e| format!("YouTube search panicked: {}", e))?
+}
+
+/// Search both Bilibili and YouTube simultaneously.
+/// Returns a CombinedSearchResult with separate result sets.
+#[tauri::command]
+async fn search_combined(query: String) -> Result<CombinedSearchResult, String> {
+    let q_bili = query.clone();
+    let q_yt = query.clone();
+
+    let (bili, yt) = tokio::try_join!(
+        tokio::task::spawn_blocking(move || online::search_bilibili(&q_bili)),
+        tokio::task::spawn_blocking(move || online::search_youtube(&q_yt)),
+    )
+    .map_err(|e| format!("Combined search panicked: {}", e))?;
+
+    Ok(CombinedSearchResult {
+        bilibili: bili?,
+        youtube: yt?,
+    })
+}
+
+#[tauri::command]
 async fn download_online_audio(
-    bvid: String,
+    source: String,
+    id_or_url: String,
     download_dir: Option<String>,
 ) -> Result<String, String> {
-    let b = bvid.clone();
+    let s = source.clone();
+    let i = id_or_url.clone();
     let d = download_dir.clone();
     tokio::task::spawn_blocking(move || {
-        online::download_online_audio(&b, d.as_deref())
+        online::download_online_audio_unified(&s, &i, d.as_deref())
     })
     .await
     .map_err(|e| format!("Download task panicked: {}", e))?
@@ -710,7 +758,10 @@ pub fn run() {
             clear_discord_presence,
             heartbeat_discord_rpc,
             search_bilibili,
+            search_youtube,
+            search_combined,
             download_online_audio,
+            get_default_download_dir,
             is_ytdlp_available,
             proxy_image,
             get_online_cache_info,

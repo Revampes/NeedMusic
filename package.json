@@ -1,7 +1,7 @@
 {
   "name": "needmusic",
   "private": true,
-  "version": "0.1.0",
+  "version": "2.0.0",
   "description": "A high-performance, locally installed desktop music player",
   "type": "module",
   "scripts": {

@@ -35,11 +35,11 @@ After installing, point NeedMusic at your local music folder and it will automat
 
 ## 📦 Current Version
 
-**v1.0** — Initial stable release.
+**v2.0** — YouTube search & audio download.
 
 | Component | Version |
 |-----------|---------|
-| NeedMusic App | `1.0` |
+| NeedMusic App | `2.0` |
 | Tauri Runtime | `2.x` |
 | React UI | `18.x` |
 | TypeScript | `5.5` |
@@ -68,10 +68,14 @@ After installing, point NeedMusic at your local music folder and it will automat
 - **Favorites** — heart a track and it auto-syncs to a `★ Favorites` playlist
 - Drag-and-drop reordering within playlists
 
-### 🌐 Online Music Search (Bilibili)
-- Search for music directly from **Bilibili**
-- **Stream** — one-click play without saving
+### 🌐 Online Music Search (Bilibili + YouTube)
+- Search for music directly from **Bilibili** and **YouTube**
+- **Simultaneous search** — results from both platforms appear in separate sections
+- **Stream** — one-click play without saving (temp download, auto-cleaned)
 - **Save to library** — download permanently into your music folder
+- YouTube search is **opt-in** via Settings (requires [yt-dlp](https://github.com/yt-dlp/yt-dlp) — auto-installed on first use)
+- YouTube downloads are **audio-only** (no video) using yt-dlp
+- ⚠️ YouTube downloads are provided for personal use — enable at your own risk
 
 ### 🎮 Discord Rich Presence
 - Shows your current track on your Discord profile
@@ -108,6 +112,7 @@ Build and run NeedMusic from source.
 | **Node.js** | ≥18 | [nodejs.org](https://nodejs.org) |
 | **Rust** | ≥1.70 | [rustup.rs](https://rustup.rs) |
 | **Git** | any | [git-scm.com](https://git-scm.com) |
+| **yt-dlp** | any | Auto-installed on first YouTube search, or `pip install yt-dlp` |
 
 > On Windows, make sure the **MSVC build tools** are installed (included with [Visual Studio Build Tools](https://visualstudio.microsoft.com/downloads/#build-tools-for-visual-studio-2022) or by running `rustup default stable-msvc`).
 
@@ -165,3 +170,6 @@ NeedMusic is built with privacy as a core principle:
 <p align="center">
   <sub>Made with ❤️ by <a href="https://github.com/Revampes">Revampes</a> · Built with <a href="https://tauri.app">Tauri</a>, <a href="https://react.dev">React</a> &amp; <a href="https://www.rust-lang.org">Rust</a></sub>
 </p> 
+<p align="center">
+  <sub>Star this repo to support the project! Thank You!</sub>
+</p>
