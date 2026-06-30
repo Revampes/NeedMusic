@@ -1,29 +1,45 @@
-/// online.rs — Bilibili music search & audio download via native API.
+/// online.rs — Bilibili & YouTube music search & audio download.
 ///
-/// Uses Bilibili's public REST API directly (no external tools needed).
-/// Implements Wbi signing for authenticated API access.
+/// Bilibili: Uses public REST API directly (no external tools needed).
+///            Implements Wbi signing for authenticated API access.
+/// YouTube:  Uses yt-dlp CLI for search & audio download.
+///           User must enable YouTube search in Settings (grey area).
 
 use std::path::{Path, PathBuf};
+use std::process::Command;
 use std::sync::Mutex;
+
+#[cfg(target_os = "windows")]
+use std::os::windows::process::CommandExt;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 // ─── Types ────────────────────────────────────────────
 
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct OnlineTrackResult {
-    pub bvid: String,
+    pub source: String,       // "bilibili" or "youtube"
+    pub id: String,           // bvid for Bilibili, video ID for YouTube
+    pub bvid: String,         // kept for backward compat (same as id for Bilibili)
     pub title: String,
     pub author: String,
     pub duration: String,     // human‑readable like "3:45"
     pub duration_secs: f64,
     pub cover_url: String,
     pub description: String,
+    pub url: String,          // full URL (YouTube needs this for download)
 }
 
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct OnlineSearchResult {
     pub results: Vec<OnlineTrackResult>,
     pub total: u64,
+}
+
+/// Combined search result from both sources.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct CombinedSearchResult {
+    pub bilibili: OnlineSearchResult,
+    pub youtube: OnlineSearchResult,
 }
 
 // ─── Wbi Signing ──────────────────────────────────────
@@ -296,8 +312,11 @@ pub fn search_bilibili(query: &str) -> Result<OnlineSearchResult, String> {
             cover_url.replace("http://", "https://")
         };
         let description = item["description"].as_str().unwrap_or("").to_string();
+        let bilibili_url = format!("https://www.bilibili.com/video/{}", bvid);
 
         results.push(OnlineTrackResult {
+            source: "bilibili".to_string(),
+            id: bvid.clone(),
             bvid,
             title,
             author,
@@ -305,6 +324,7 @@ pub fn search_bilibili(query: &str) -> Result<OnlineSearchResult, String> {
             duration_secs,
             cover_url,
             description,
+            url: bilibili_url,
         });
     }
 
@@ -543,21 +563,323 @@ fn find_cached_audio(dir: &Path, bvid: &str) -> Option<PathBuf> {
     None
 }
 
-// ─── Availability check (always true — no external deps) ─
+// ─── Availability check ──────────────────────────────
 
+/// Check if yt-dlp is available on the system PATH.
 pub fn is_ytdlp_available() -> bool {
-    true
+    let mut cmd = Command::new("yt-dlp");
+    #[cfg(target_os = "windows")]
+    cmd.creation_flags(0x08000000);
+    cmd.arg("--version")
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .output()
+        .map(|o| o.status.success())
+        .unwrap_or(false)
+}
+
+/// Find yt-dlp executable — tries yt-dlp first, then python -m yt_dlp, then auto-installs.
+fn find_ytdlp() -> Result<Command, String> {
+    if is_ytdlp_available() {
+        let mut cmd = Command::new("yt-dlp");
+        #[cfg(target_os = "windows")]
+        cmd.creation_flags(0x08000000); // CREATE_NO_WINDOW
+        cmd.stderr(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped());
+        return Ok(cmd);
+    }
+    // Try python -m yt_dlp
+    let mut probe = Command::new("python");
+    #[cfg(target_os = "windows")]
+    probe.creation_flags(0x08000000);
+    let output = probe
+        .args(["-m", "yt_dlp", "--version"])
+        .output()
+        .unwrap_or_else(|_| std::process::Output {
+            status: std::process::ExitStatus::default(),
+            stdout: vec![],
+            stderr: vec![],
+        });
+    if output.status.success() {
+        let mut cmd = Command::new("python");
+        #[cfg(target_os = "windows")]
+        cmd.creation_flags(0x08000000);
+        cmd.arg("-m").arg("yt_dlp")
+            .stderr(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped());
+        return Ok(cmd);
+    }
+
+    // Auto-install: try pip install yt-dlp
+    let mut install = Command::new("pip");
+    #[cfg(target_os = "windows")]
+    install.creation_flags(0x08000000);
+    let result = install
+        .args(["install", "yt-dlp", "--quiet", "--disable-pip-version-check"])
+        .stderr(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .output();
+
+    if let Ok(out) = &result {
+        if out.status.success() && is_ytdlp_available() {
+            let mut cmd = Command::new("yt-dlp");
+            #[cfg(target_os = "windows")]
+            cmd.creation_flags(0x08000000);
+            cmd.stderr(std::process::Stdio::piped())
+                .stdout(std::process::Stdio::piped());
+            return Ok(cmd);
+        }
+    }
+
+    // Also try pip3 / python -m pip as fallback
+    for installer in &["pip3", "python"] {
+        let args: &[&str] = if *installer == "python" {
+            &["-m", "pip", "install", "yt-dlp", "--quiet", "--disable-pip-version-check"]
+        } else {
+            &["install", "yt-dlp", "--quiet", "--disable-pip-version-check"]
+        };
+        let mut cmd = Command::new(installer);
+        #[cfg(target_os = "windows")]
+        cmd.creation_flags(0x08000000);
+        if let Ok(out) = cmd.args(args)
+            .stderr(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .output()
+        {
+            if out.status.success() && is_ytdlp_available() {
+                let mut cmd = Command::new("yt-dlp");
+                #[cfg(target_os = "windows")]
+                cmd.creation_flags(0x08000000);
+                cmd.stderr(std::process::Stdio::piped())
+                    .stdout(std::process::Stdio::piped());
+                return Ok(cmd);
+            }
+        }
+    }
+
+    Err("yt-dlp could not be found or auto-installed. Install it manually: pip install yt-dlp".to_string())
+}
+
+// ─── YouTube Search ───────────────────────────────────
+
+/// Search YouTube using yt-dlp's flat extraction.
+/// Returns music-focused results by appending "music" / "audio" keywords.
+pub fn search_youtube(query: &str) -> Result<OnlineSearchResult, String> {
+    let _ytdlp = find_ytdlp()?;
+
+    // yt-dlp "ytsearchN:query" format searches YouTube directly.
+    let search_query = format!("ytsearch20:{} music audio", query);
+
+    let output = run_ytdlp(
+        &search_query,
+        &[
+            "--flat-playlist",
+            "--dump-json",
+            "--no-warnings",
+            "--no-check-certificate",
+            "--socket-timeout", "15",
+        ],
+    )?;
+
+    let mut results: Vec<OnlineTrackResult> = Vec::new();
+
+    for line in output.lines() {
+        let line = line.trim();
+        if line.is_empty() {
+            continue;
+        }
+        if let Ok(json) = serde_json::from_str::<serde_json::Value>(line) {
+            let id = json["id"].as_str().unwrap_or("").to_string();
+            if id.is_empty() {
+                continue;
+            }
+            let title = json["title"].as_str().unwrap_or("Unknown").to_string();
+            let author = json["uploader"]
+                .as_str()
+                .or_else(|| json["channel"].as_str())
+                .unwrap_or("Unknown")
+                .to_string();
+
+            let duration_secs = json["duration"].as_f64().unwrap_or(0.0);
+            let duration = fmt_secs(duration_secs);
+
+            // YouTube flat-playlist returns "thumbnails" array, not "thumbnail" string.
+            let cover_url = json["thumbnails"]
+                .as_array()
+                .and_then(|arr| {
+                    // Pick the last (highest-res) thumbnail.
+                    arr.last()
+                        .and_then(|t| t["url"].as_str())
+                })
+                .or_else(|| json["thumbnail"].as_str())
+                .unwrap_or("")
+                .to_string();
+            // If still empty, fall back to the standard YouTube thumbnail URL.
+            let cover_url = if cover_url.is_empty() && !id.is_empty() {
+                format!("https://i.ytimg.com/vi/{}/hqdefault.jpg", id)
+            } else {
+                cover_url
+            };
+
+            let description = json["description"]
+                .as_str()
+                .unwrap_or("")
+                .to_string();
+
+            let url = json["webpage_url"]
+                .as_str()
+                .or_else(|| json["url"].as_str())
+                .unwrap_or("")
+                .to_string();
+            let url = if url.is_empty() {
+                format!("https://www.youtube.com/watch?v={}", id)
+            } else {
+                url.to_string()
+            };
+
+            results.push(OnlineTrackResult {
+                source: "youtube".to_string(),
+                id: id.clone(),
+                bvid: id, // re-use field for ID
+                title,
+                author,
+                duration,
+                duration_secs,
+                cover_url,
+                description,
+                url,
+            });
+        }
+    }
+
+    let total = results.len() as u64;
+    Ok(OnlineSearchResult { results, total })
+}
+
+/// Run yt-dlp with given arguments and return stdout as String.
+fn run_ytdlp(query_or_url: &str, extra_args: &[&str]) -> Result<String, String> {
+    let mut cmd = find_ytdlp()?;
+    cmd.arg(query_or_url);
+    for arg in extra_args {
+        cmd.arg(arg);
+    }
+
+    let output = cmd.output().map_err(|e| format!("yt-dlp failed to start: {}", e))?;
+
+    let stdout = String::from_utf8_lossy(&output.stdout).to_string();
+    let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+
+    if !output.status.success() {
+        let err_msg = if stderr.is_empty() { stdout } else { stderr };
+        return Err(format!("yt-dlp error: {}", err_msg));
+    }
+
+    Ok(stdout)
+}
+
+// ─── YouTube Audio Download ───────────────────────────
+
+/// Download audio from a YouTube URL using yt-dlp.
+/// Extracts best audio, converts to m4a.
+pub fn download_youtube_audio(
+    url: &str,
+    download_dir: Option<&str>,
+) -> Result<String, String> {
+    let out_dir = match download_dir {
+        Some(d) if !d.is_empty() => PathBuf::from(d),
+        _ => std::env::temp_dir().join("needmusic_online"),
+    };
+    std::fs::create_dir_all(&out_dir)
+        .map_err(|e| format!("Cannot create dir: {}", e))?;
+
+    // Build output template: %(id)s.%(ext)s in the target dir.
+    let out_template = out_dir.join("%(id)s.%(ext)s");
+    let out_template_str = out_template.to_string_lossy().to_string();
+
+    run_ytdlp(
+        url,
+        &[
+            "-f", "bestaudio[ext=m4a]/bestaudio/best",
+            "--extract-audio",
+            "--audio-format", "m4a",
+            "--audio-quality", "0",
+            "-o", &out_template_str,
+            "--no-playlist",
+            "--no-warnings",
+            "--no-check-certificate",
+            "--socket-timeout", "30",
+            "-R", "3",           // retry 3 times
+            "--fragment-retries", "3",
+        ],
+    )?;
+
+    // Find the downloaded file (we use %(id)s in template, but yt-dlp may append
+    // extra suffixes for some formats — look for any file starting with the video ID).
+    // Actually yt-dlp uses the exact template; but extract-audio may change the ext.
+    // Let's just scan the dir for the most recently created file matching our pattern.
+    let downloaded = find_downloaded_file(&out_dir)
+        .ok_or("Download completed but could not locate output file".to_string())?;
+
+    Ok(downloaded.to_string_lossy().to_string())
+}
+
+/// Find the most recently modified file in a directory (the one yt-dlp just created).
+fn find_downloaded_file(dir: &Path) -> Option<PathBuf> {
+    let mut best: Option<(PathBuf, u64)> = None;
+    if let Ok(entries) = std::fs::read_dir(dir) {
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_file() {
+                if let Ok(meta) = entry.metadata() {
+                    if let Ok(modified) = meta.modified() {
+                        if let Ok(epoch) = modified.duration_since(std::time::UNIX_EPOCH) {
+                            let secs = epoch.as_secs();
+                            match &best {
+                                None => best = Some((path, secs)),
+                                Some((_, prev)) if secs > *prev => {
+                                    best = Some((path, secs));
+                                }
+                                _ => {}
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    best.map(|(p, _)| p)
+}
+
+// ─── Unified Download (Bilibili or YouTube) ───────────
+
+/// Download audio from either Bilibili (bvid) or YouTube (url).
+/// `source` must be "bilibili" or "youtube".
+pub fn download_online_audio_unified(
+    source: &str,
+    id_or_url: &str,
+    download_dir: Option<&str>,
+) -> Result<String, String> {
+    match source {
+        "youtube" => download_youtube_audio(id_or_url, download_dir),
+        _ => download_online_audio(id_or_url, download_dir),
+    }
 }
 
 // ─── Image Proxy ──────────────────────────────────────
 
-/// Fetch an image URL with proper Referer header and return as base64 data URI.
-/// Bilibili's CDN blocks requests without `Referer: https://www.bilibili.com/`.
+/// Fetch an image URL and return as base64 data URI.
+/// Adds Referer header for Bilibili CDN, works with any image URL.
 pub fn proxy_image(url: &str) -> Result<String, String> {
     let client = http_client();
-    let resp = client
-        .get(url)
-        .header("Referer", "https://www.bilibili.com/")
+    let mut req = client.get(url);
+
+    // Bilibili's CDN blocks requests without this referer.
+    // YouTube and other sources work fine with or without it.
+    if url.contains("hdslb.com") || url.contains("bilibili.com") {
+        req = req.header("Referer", "https://www.bilibili.com/");
+    }
+
+    let resp = req
         .send()
         .map_err(|e| format!("Image fetch failed: {}", e))?;
 

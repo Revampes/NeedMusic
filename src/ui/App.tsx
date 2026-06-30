@@ -37,7 +37,6 @@ const App: React.FC = () => {
   const [ready, setReady] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [tracks, setTracks] = useState<Track[]>([]);
-  const [musicFolder, setMusicFolder] = useState<string>("");
   const [activeTab, setActiveTab] = useState("Tracks");
   const [searchQuery, setSearchQuery] = useState("");
   const [filterField, setFilterField] = useState("All");
@@ -120,8 +119,6 @@ const App: React.FC = () => {
       }
 
       setTracks(LibraryManager.getInstance().getAllTracks());
-      const scanPath = await db.getSetting("scanFolderPath");
-      if (scanPath) setMusicFolder(scanPath);
       engine.subscribe({
         onStateChange: (s) => setPlayer((p) => ({ ...p, playbackState: s })),
         onTrackChange: (t) => setPlayer((p) => ({
@@ -356,7 +353,6 @@ const App: React.FC = () => {
              activeTab === "Playlists" ? <PlaylistsView tracks={tracks} /> :
              activeTab === "Online" ? (
                <OnlineSearchView
-                 musicFolder={musicFolder}
                  onTrackSaved={() => setTracks(LibraryManager.getInstance().getAllTracks())}
                />
              ) :
