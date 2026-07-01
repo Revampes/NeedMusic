@@ -9,12 +9,14 @@ use std::time::Duration;
 mod scanner;
 mod concurrency;
 mod audio;
+mod audio_eq;
 mod discord_rpc;
 mod online;
 
 pub use scanner::LibraryScanner;
 pub use concurrency::ConcurrencyGate;
 pub use audio::NativeAudioPlayer;
+pub use audio_eq::{Equalizer, EqBand, EqPreset, EQ_PRESETS};
 pub use discord_rpc::DiscordRpcManager;
 pub use online::{OnlineTrackResult, OnlineSearchResult, CombinedSearchResult};
 
@@ -24,6 +26,7 @@ pub struct AppState {
     pub is_playing: Mutex<bool>,
     pub close_to_tray: Mutex<bool>,
     pub audio: NativeAudioPlayer,
+    pub equalizer: Mutex<Equalizer>,
     pub discord_rpc: DiscordRpcManager,
 }
 
@@ -551,6 +554,187 @@ async fn clear_online_cache() -> Result<(), String> {
     Ok(())
 }
 
+// ─── Equalizer Commands ─────────────────────────────
+
+#[tauri::command]
+async fn set_eq_enabled(enabled: bool, state: State<'_, AppState>) -> Result<(), String> {
+    let mut eq = state.equalizer.lock().map_err(|e| e.to_string())?;
+    eq.set_enabled(enabled);
+    // Sync to audio player
+    state.audio.set_eq_enabled(enabled);
+    Ok(())
+}
+
+#[tauri::command]
+async fn set_eq_band_gain(index: usize, gain_db: f64, state: State<'_, AppState>) -> Result<(), String> {
+    let mut eq = state.equalizer.lock().map_err(|e| e.to_string())?;
+    eq.set_band_gain(index, gain_db);
+    // Sync to audio player
+    let gains = eq.get_band_gains();
+    let mut arr = [0.0_f64; 5];
+    for (i, &g) in gains.iter().enumerate().take(5) {
+        arr[i] = g;
+    }
+    state.audio.set_eq_gains(arr);
+    Ok(())
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct EqState {
+    pub enabled: bool,
+    pub bands: Vec<EqBandInfo>,
+    pub presets: Vec<EqPresetInfo>,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct EqBandInfo {
+    pub freq: f64,
+    pub gain_db: f64,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct EqPresetInfo {
+    pub name: String,
+    pub description: String,
+    pub gains: Vec<f64>,
+}
+
+#[tauri::command]
+async fn get_eq_state(state: State<'_, AppState>) -> Result<EqState, String> {
+    let eq = state.equalizer.lock().map_err(|e| e.to_string())?;
+    let gains = eq.get_band_gains();
+    let bands: Vec<EqBandInfo> = Equalizer::DEFAULT_BANDS
+        .iter()
+        .enumerate()
+        .map(|(i, b)| EqBandInfo {
+            freq: b.freq,
+            gain_db: gains.get(i).copied().unwrap_or(0.0),
+        })
+        .collect();
+    let presets: Vec<EqPresetInfo> = EQ_PRESETS
+        .iter()
+        .map(|p| EqPresetInfo {
+            name: p.name.to_string(),
+            description: p.description.to_string(),
+            gains: p.gains.to_vec(),
+        })
+        .collect();
+    Ok(EqState {
+        enabled: eq.is_enabled(),
+        bands,
+        presets,
+    })
+}
+
+#[tauri::command]
+async fn get_eq_presets() -> Result<Vec<EqPresetInfo>, String> {
+    Ok(EQ_PRESETS
+        .iter()
+        .map(|p| EqPresetInfo {
+            name: p.name.to_string(),
+            description: p.description.to_string(),
+            gains: p.gains.to_vec(),
+        })
+        .collect())
+}
+
+#[tauri::command]
+async fn apply_eq_preset(preset_index: usize, state: State<'_, AppState>) -> Result<(), String> {
+    let mut eq = state.equalizer.lock().map_err(|e| e.to_string())?;
+    if let Some(preset) = EQ_PRESETS.get(preset_index) {
+        eq.set_band_gains(&preset.gains);
+        // Sync to audio player
+        let gains = eq.get_band_gains();
+        let mut arr = [0.0_f64; 5];
+        for (i, &g) in gains.iter().enumerate().take(5) {
+            arr[i] = g;
+        }
+        state.audio.set_eq_gains(arr);
+    }
+    Ok(())
+}
+
+/// Process audio samples through the equalizer.
+/// Called from NativeAudioPlayer when applying EQ to decoded samples.
+pub fn apply_eq_to_samples(
+    eq: &mut Equalizer,
+    channels: usize,
+    samples: &mut [f32],
+) {
+    eq.process(channels, samples);
+}
+
+// ─── Hotkey Commands ────────────────────────────────
+
+use tauri_plugin_global_shortcut::{GlobalShortcutExt, ShortcutState};
+
+#[tauri::command]
+async fn register_hotkey(
+    _hotkey_id: String,
+    key: String,
+    modifiers: Vec<String>,
+    action: String,
+    app: tauri::AppHandle,
+) -> Result<(), String> {
+    let shortcut_str = build_shortcut_string(&key, &modifiers);
+
+    let h = app.clone();
+    let action_clone = action.clone();
+
+    app.global_shortcut().on_shortcut(shortcut_str.as_str(), move |_app, _s, event| {
+        if event.state == ShortcutState::Pressed {
+            if let Some(window) = h.get_webview_window("main") {
+                let _ = window.emit("hotkey-action", action_clone.clone());
+            }
+        }
+    })
+    .map_err(|e| format!("Failed to register hotkey '{}': {}", shortcut_str, e))?;
+
+    Ok(())
+}
+
+#[tauri::command]
+async fn unregister_hotkey(
+    key: String,
+    modifiers: Vec<String>,
+    app: tauri::AppHandle,
+) -> Result<(), String> {
+    let shortcut_str = build_shortcut_string(&key, &modifiers);
+    app.global_shortcut().unregister(shortcut_str.as_str())
+        .map_err(|e| format!("Failed to unregister hotkey: {}", e))?;
+    Ok(())
+}
+
+fn build_shortcut_string(key: &str, modifiers: &[String]) -> String {
+    let mut parts: Vec<&str> = Vec::new();
+    for m in modifiers {
+        match m.to_lowercase().as_str() {
+            "ctrl" | "control" => parts.push("Control"),
+            "alt" => parts.push("Alt"),
+            "shift" => parts.push("Shift"),
+            "meta" | "super" | "win" => parts.push("Super"),
+            _ => {}
+        }
+    }
+    parts.push(key);
+    parts.join("+")
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct RegisteredHotkey {
+    pub id: String,
+    pub key: String,
+    pub modifiers: Vec<String>,
+    pub action: String,
+}
+
+#[tauri::command]
+async fn get_registered_hotkeys() -> Result<Vec<RegisteredHotkey>, String> {
+    // The global-shortcut plugin doesn't expose a list of registered shortcuts,
+    // so we return an empty list. The frontend manages its own hotkey state.
+    Ok(Vec::new())
+}
+
 // ─── Dev Server Detection ───────────────────────────────
 
 /// Quick check if the Vite dev server is accepting connections.
@@ -598,7 +782,18 @@ pub fn run() {
                 .item(&quit_item)
                 .build()?;
 
+            let tray_icon = app.default_window_icon().cloned()
+                .unwrap_or_else(|| {
+                    // Fallback: decode the bundled PNG icon
+                    let img = image::load_from_memory(include_bytes!("../icons/32x32.png"))
+                        .expect("Failed to load tray icon PNG")
+                        .into_rgba8();
+                    let (w, h) = img.dimensions();
+                    tauri::image::Image::new_owned(img.into_raw(), w, h)
+                });
+
             let _tray = TrayIconBuilder::new()
+                .icon(tray_icon)
                 .menu(&tray_menu)
                 .tooltip("NeedMusic")
                 .on_menu_event(move |app, event| {
@@ -717,6 +912,8 @@ pub fn run() {
 
             let audio_player = NativeAudioPlayer::new(stream_handle);
 
+            let equalizer = Mutex::new(Equalizer::new(44100));
+
             let discord_rpc = DiscordRpcManager::new("1519532803811704953".to_string());
 
             app.manage(AppState {
@@ -725,6 +922,7 @@ pub fn run() {
                 is_playing: Mutex::new(false),
                 close_to_tray: Mutex::new(true),  // default: hide to tray
                 audio: audio_player,
+                equalizer,
                 discord_rpc,
             });
 
@@ -766,6 +964,14 @@ pub fn run() {
             proxy_image,
             get_online_cache_info,
             clear_online_cache,
+            set_eq_enabled,
+            set_eq_band_gain,
+            get_eq_state,
+            get_eq_presets,
+            apply_eq_preset,
+            register_hotkey,
+            unregister_hotkey,
+            get_registered_hotkeys,
         ])
         .run(tauri::generate_context!())
         .expect("error while running NeedMusic");

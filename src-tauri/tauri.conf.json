@@ -4,8 +4,8 @@
   "version": "2.0.0",
   "identifier": "com.needmusic.app",
   "build": {
-    "beforeDevCommand": "npm run dev",
-    "beforeBuildCommand": "npm run build",
+    "beforeDevCommand": "npm.cmd run dev",
+    "beforeBuildCommand": "npm.cmd run build",
     "frontendDist": "../dist"
   },
   "app": {

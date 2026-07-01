@@ -48,6 +48,7 @@ const OnlineSearchView: React.FC<OnlineSearchViewProps> = ({ onTrackSaved }) => 
   const [error, setError] = useState<string | null>(null);
   const [youtubeEnabled, setYoutubeEnabled] = useState(false);
   const [downloadDir, setDownloadDir] = useState("");
+  const [viewMode, setViewMode] = useState<"grid" | "list">("list");
 
   const service = OnlineMusicService.getInstance();
   const engine = PlaybackEngine.getInstance();
@@ -69,6 +70,10 @@ const OnlineSearchView: React.FC<OnlineSearchViewProps> = ({ onTrackSaved }) => 
         }
       }
       setDownloadDir(dir || "");
+
+      // Load view mode preference
+      const savedView = await db.getSetting("searchViewMode");
+      if (savedView === "grid") setViewMode("grid");
     })();
   }, [db]);
 
@@ -224,6 +229,53 @@ const OnlineSearchView: React.FC<OnlineSearchViewProps> = ({ onTrackSaved }) => 
     </div>
   );
 
+  // ── List view variant (compact row, no cover image) ──
+  const renderResultRow = (item: OnlineSearchItem) => (
+    <div key={`${item.source}-${item.id}`} className="online-result-row">
+      {/* Source badge */}
+      <span className={`online-source-badge ${item.source}`}>
+        {item.source === "youtube" ? "YT" : "Bili"}
+      </span>
+      {/* Title + author */}
+      <div className="online-result-row-info">
+        <div className="online-result-row-title" title={item.title}>
+          {item.title}
+        </div>
+        <div className="online-result-row-meta">
+          <span className="online-result-row-author">{item.author}</span>
+          <span className="online-result-row-duration">{item.duration}</span>
+        </div>
+      </div>
+      {/* Action buttons */}
+      <div className="online-result-row-actions">
+        <button
+          className="online-action-btn play"
+          onClick={() => handlePlay(item)}
+          disabled={downloading === item.id}
+          title="Play now"
+        >
+          {downloading === item.id ? <span className="online-spinner" /> : <IconPlay size={12} />}
+          Play
+        </button>
+        <button
+          className="online-action-btn save"
+          onClick={() => handleSave(item)}
+          disabled={downloading === item.id || !downloadDir}
+          title={downloadDir ? "Save to library" : "Download path not set — check Settings"}
+        >
+          <IconPlus size={12} />
+          Save
+        </button>
+      </div>
+    </div>
+  );
+
+  const toggleViewMode = async () => {
+    const next = viewMode === "grid" ? "list" : "grid";
+    setViewMode(next);
+    await db.setSetting("searchViewMode", next);
+  };
+
   return (
     <div className="online-search-view">
       {/* Search bar */}
@@ -244,6 +296,16 @@ const OnlineSearchView: React.FC<OnlineSearchViewProps> = ({ onTrackSaved }) => 
         >
           {loading ? "Searching..." : "Search"}
         </button>
+        {/* View toggle */}
+        {hasResults && (
+          <button
+            className="online-view-toggle"
+            onClick={toggleViewMode}
+            title={viewMode === "grid" ? "Switch to list view" : "Switch to grid view"}
+          >
+            {viewMode === "grid" ? "☰ List" : "▦ Grid"}
+          </button>
+        )}
       </div>
 
       {/* Error */}
@@ -261,9 +323,15 @@ const OnlineSearchView: React.FC<OnlineSearchViewProps> = ({ onTrackSaved }) => 
             <span className="online-source-badge bilibili">Bili</span>
             Bilibili Results
           </h3>
-          <div className="online-results-grid">
-            {bilibiliResults.map(renderResultCard)}
-          </div>
+          {viewMode === "grid" ? (
+            <div className="online-results-grid">
+              {bilibiliResults.map(renderResultCard)}
+            </div>
+          ) : (
+            <div className="online-results-list">
+              {bilibiliResults.map(renderResultRow)}
+            </div>
+          )}
         </div>
       )}
 
@@ -274,9 +342,15 @@ const OnlineSearchView: React.FC<OnlineSearchViewProps> = ({ onTrackSaved }) => 
             <span className="online-source-badge youtube">YT</span>
             YouTube Results
           </h3>
-          <div className="online-results-grid">
-            {youtubeResults.map(renderResultCard)}
-          </div>
+          {viewMode === "grid" ? (
+            <div className="online-results-grid">
+              {youtubeResults.map(renderResultCard)}
+            </div>
+          ) : (
+            <div className="online-results-list">
+              {youtubeResults.map(renderResultRow)}
+            </div>
+          )}
         </div>
       )}
 

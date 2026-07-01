@@ -6,6 +6,8 @@ import { DiscordRpcService } from "@core/services/DiscordRpcService";
 import { OnlineMusicService } from "@core/services/OnlineMusicService";
 import { Track } from "@core/models/Track";
 import { IconFolder, IconVolume, IconPalette, IconSettings, IconRocket, IconCheck, IconAlert } from "@ui/components/Icons";
+import EqSettings from "@ui/components/EqSettings";
+import HotkeySettings from "@ui/components/HotkeySettings";
 
 interface Props { onTracksLoaded: (tracks: Track[]) => void; }
 type Settings = Record<string, string>;
@@ -187,6 +189,11 @@ const SettingsView: React.FC<Props> = ({ onTracksLoaded }) => {
         <label className="settings-check"><input type="checkbox" checked={settings.gapless==="true"} onChange={e => save("gapless", e.target.checked?"true":"false")} /> Gapless Playback</label>
       </section>
 
+      {/* ── Equalizer ── */}
+      <section><h3><IconVolume size={16} style={{ marginRight: 6 }} />Equalizer</h3>
+        <EqSettings />
+      </section>
+
       <section><h3><IconPalette size={16} style={{ marginRight: 6 }} />Appearance</h3>
         <label className="settings-row"><span>Theme</span>
           <select className="settings-input" style={{ width:140 }} value={styleVal} onChange={async e => { await save("backgroundStyle", e.target.value); applyStyle(e.target.value); }}>
@@ -356,6 +363,11 @@ const SettingsView: React.FC<Props> = ({ onTracksLoaded }) => {
             await save("discordRpc", "false");
           }
         }} /> Discord Rich Presence <span style={{ fontSize:10, color:"var(--text-tertiary)", marginLeft:4 }}>(shows what you're listening to on your profile)</span></label>
+      </section>
+
+      {/* ── Hotkeys ── */}
+      <section><h3><IconSettings size={16} style={{ marginRight: 6 }} />Keyboard Shortcuts</h3>
+        <HotkeySettings />
       </section>
 
       <section><h3><IconRocket size={16} style={{ marginRight: 6 }} />Startup</h3>
