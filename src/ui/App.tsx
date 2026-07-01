@@ -46,6 +46,8 @@ const App: React.FC = () => {
     repeatMode: RepeatMode.Off, isShuffled: false, isFavorite: false, buffering: false,
   });
   const engine = useMemo(() => PlaybackEngine.getInstance(), []);
+  const keydownCleanupRef = useRef<(() => void) | null>(null);
+  const hotkeyUnlistenRef = useRef<(() => void) | null>(null);
 
   useEffect(() => {
     let timedOut = false;
@@ -193,6 +195,86 @@ const App: React.FC = () => {
 
       // ── End Island Bridge ──
 
+      // ── Keyboard Shortcuts (Spacebar, etc.) ──
+      const handleKeyDown = (e: KeyboardEvent) => {
+        // Don't intercept when typing in input fields
+        const tag = (e.target as HTMLElement)?.tagName?.toLowerCase();
+        if (tag === "input" || tag === "textarea" || tag === "select") return;
+
+        // Spacebar → Play/Pause
+        if (e.code === "Space" && !e.ctrlKey && !e.altKey && !e.metaKey) {
+          e.preventDefault();
+          if (engine.state === PlaybackState.Playing) {
+            engine.pause();
+          } else {
+            engine.resume();
+          }
+          return;
+        }
+      };
+      document.addEventListener("keydown", handleKeyDown);
+      keydownCleanupRef.current = () => document.removeEventListener("keydown", handleKeyDown);
+
+      // ── Global Hotkey Actions (from Rust backend) ──
+      try {
+        const { listen } = await import("@tauri-apps/api/event");
+        const unlisten = await listen<string>("hotkey-action", (event) => {
+          const action = event.payload;
+          switch (action) {
+            case "playpause":
+              if (engine.state === PlaybackState.Playing) engine.pause();
+              else engine.resume();
+              break;
+            case "next":
+              engine.next();
+              break;
+            case "previous":
+              engine.previous();
+              break;
+            case "stop":
+              engine.stop();
+              break;
+            case "loop":
+              // Cycle: Off → Track → Playlist → Off
+              const modes = [RepeatMode.Off, RepeatMode.Track, RepeatMode.Playlist];
+              const currentIdx = modes.indexOf(engine.repeatMode);
+              engine.repeatMode = modes[(currentIdx + 1) % modes.length];
+              setPlayer((p) => ({ ...p, repeatMode: engine.repeatMode }));
+              break;
+            case "shuffle":
+              setPlayer((p) => ({ ...p, isShuffled: !p.isShuffled }));
+              break;
+            case "volup":
+              engine.setVolume(Math.min(1, engine.volume + 0.05));
+              setPlayer((p) => ({ ...p, volume: engine.volume }));
+              break;
+            case "voldown":
+              engine.setVolume(Math.max(0, engine.volume - 0.05));
+              setPlayer((p) => ({ ...p, volume: engine.volume }));
+              break;
+          }
+        });
+        hotkeyUnlistenRef.current = unlisten;
+      } catch { /* ignore */ }
+
+      // ── Register saved global hotkeys on startup ──
+      try {
+        const savedHotkeys = await db.getSetting("hotkeys");
+        if (savedHotkeys) {
+          const parsed = JSON.parse(savedHotkeys);
+          for (const hk of parsed) {
+            if (hk.isGlobal) {
+              invoke("register_hotkey", {
+                hotkeyId: hk.id,
+                key: hk.key,
+                modifiers: hk.modifiers || [],
+                action: hk.action,
+              }).catch(() => { /* hotkey may already be registered */ });
+            }
+          }
+        }
+      } catch { /* ignore */ }
+
       let gamingVolume = 1;
       const { getCurrentWindow } = await import("@tauri-apps/api/window");
       const win = getCurrentWindow();
@@ -229,7 +311,7 @@ const App: React.FC = () => {
       console.error("[NeedMusic] Initialization error:", msg, err);
       setError(msg);
     });
-    return () => { clearTimeout(timeoutId); if (islandInterval) clearInterval(islandInterval); BackgroundEngine.getInstance().unmount(); };
+    return () => { clearTimeout(timeoutId); if (islandInterval) clearInterval(islandInterval); keydownCleanupRef.current?.(); hotkeyUnlistenRef.current?.(); BackgroundEngine.getInstance().unmount(); };
   }, [engine]);
 
   const filteredTracks = useMemo(() => {
@@ -441,7 +523,16 @@ const TrackListView: React.FC<{ tracks: Track[]; currentTrack: ITrack | null; on
         <span className="col-dur"><IconClock size={12} style={{ marginRight: 2 }} /></span><span className="col-add" />
       </div>
       {tracks.length === 0 ? <div className="track-empty">No tracks found.</div> : tracks.map((t) => (
-        <div key={t.id} className={`track-row ${currentTrack?.id === t.id ? "active" : ""}`} onDoubleClick={() => onPlay(t)}>
+        <div
+          key={t.id}
+          className={`track-row ${currentTrack?.id === t.id ? "active" : ""}`}
+          draggable
+          onDragStart={(e) => {
+            e.dataTransfer.setData("text/plain", t.id);
+            e.dataTransfer.effectAllowed = "copy";
+          }}
+          onDoubleClick={() => onPlay(t)}
+        >
           <span className="col-fav fav-btn" onClick={(e) => { e.stopPropagation(); onToggleFav(t); }}>{t.isFavorite ? <IconHeartFill size={13} /> : <IconHeart size={13} />}</span>
           <span className="col-title"><span className="track-thumb">{t.hasArtwork ? <IconImage size={14} /> : <IconMusic size={14} />}</span><MarqueeText>{t.title}</MarqueeText></span>
           <span className="col-artist"><MarqueeText>{t.artist}</MarqueeText></span>

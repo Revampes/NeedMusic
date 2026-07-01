@@ -16,11 +16,16 @@ use symphonia::core::probe::Hint;
 use std::io::Cursor;
 use std::sync::Mutex;
 
+use crate::audio_eq::Equalizer;
+
 pub struct NativeAudioPlayer {
     stream_handle: OutputStreamHandle,
     sink: Mutex<Option<Sink>>,
     current_path: Mutex<Option<String>>,
     current_duration: Mutex<f64>,
+    /// Cached EQ band gains for processing decoded audio.
+    eq_gains: Mutex<[f64; 5]>,
+    eq_enabled: Mutex<bool>,
 }
 
 impl NativeAudioPlayer {
@@ -30,7 +35,37 @@ impl NativeAudioPlayer {
             sink: Mutex::new(None),
             current_path: Mutex::new(None),
             current_duration: Mutex::new(0.0),
+            eq_gains: Mutex::new([0.0_f64; 5]),
+            eq_enabled: Mutex::new(true),
         }
+    }
+
+    /// Set the EQ band gains. Values are in dB.
+    pub fn set_eq_gains(&self, gains: [f64; 5]) {
+        if let Ok(mut g) = self.eq_gains.lock() {
+            *g = gains;
+        }
+    }
+
+    /// Enable or disable the EQ.
+    pub fn set_eq_enabled(&self, enabled: bool) {
+        if let Ok(mut e) = self.eq_enabled.lock() {
+            *e = enabled;
+        }
+    }
+
+    fn apply_eq(&self, sample_rate: u32, channels: usize, samples: &mut [f32]) {
+        let enabled = self.eq_enabled.lock().map(|e| *e).unwrap_or(true);
+        if !enabled {
+            return;
+        }
+        let gains = self.eq_gains.lock().map(|g| *g).unwrap_or([0.0; 5]);
+        if gains.iter().all(|&g| g.abs() < 0.01) {
+            return;
+        }
+        let mut eq = Equalizer::new(sample_rate);
+        eq.set_band_gains(&gains);
+        eq.process(channels, samples);
     }
 
     /// Decode audio data using symphonia directly into raw f32 PCM samples.
@@ -139,8 +174,11 @@ impl NativeAudioPlayer {
             .map_err(|e| format!("Read error: {}", e))?;
 
         // Decode using symphonia directly — avoids rodio's buggy Decoder.
-        let (samples, sample_rate, channels, dur) =
+        let (mut samples, sample_rate, channels, dur) =
             Self::decode_with_symphonia(&data)?;
+
+        // Apply EQ to decoded samples.
+        self.apply_eq(sample_rate, channels, &mut samples);
 
         // Wrap decoded PCM in rodio's SamplesBuffer (implements Source).
         let source = rodio::buffer::SamplesBuffer::new(
@@ -202,6 +240,9 @@ impl NativeAudioPlayer {
 
             let (mut samples, sample_rate, channels, metadata_dur) =
                 Self::decode_with_symphonia(&data)?;
+
+            // Apply EQ to decoded samples before seeking.
+            self.apply_eq(sample_rate, channels, &mut samples);
 
             // Compute total duration before we consume samples with split_off.
             let total_from_samples = samples.len() as f64
