@@ -1087,6 +1087,8 @@ html.glass-opacity-100 { --glass-bg-opacity: 0.88; }
   border-radius: var(--radius-xl);
   position: relative;
   overflow: hidden;
+  flex-shrink: 0;
+  min-height: 90px;
 }
 .home-hero::before {
   content: '';
