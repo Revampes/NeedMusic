@@ -50,7 +50,8 @@ const SettingsView: React.FC<Props> = ({ onTracksLoaded }) => {
   const [settings, setSettings] = useState<Settings>(DEFAULTS);
   const [scanPath, setScanPath] = useState("");
   const [scanning, setScanning] = useState(false);
-  const [scanResult, setScanResult] = useState<{ type: "success" | "error"; text: string } | null>(null);
+  const [scanResult, setScanResult] = useState<{ type: "success" | "error" | "debug"; text: string } | null>(null);
+  const [debugScanning, setDebugScanning] = useState(false);
   const [cacheInfo, setCacheInfo] = useState<CacheInfo | null>(null);
   const [clearingCache, setClearingCache] = useState(false);
   const [ytDlpAvailable, setYtDlpAvailable] = useState(false);
@@ -163,12 +164,46 @@ const SettingsView: React.FC<Props> = ({ onTracksLoaded }) => {
   const handleScan = useCallback(async () => {
     if (!scanPath.trim()) return; setScanning(true); setScanResult(null);
     try {
-      await LibraryManager.getInstance().scanDirectory(scanPath.trim());
-      setScanResult({ type: "success", text: "Done" }); onTracksLoaded(LibraryManager.getInstance().getAllTracks());
+      const count = await LibraryManager.getInstance().scanDirectory(scanPath.trim());
+      const all = LibraryManager.getInstance().getAllTracks();
+      setScanResult({ type: "success", text: count > 0 ? `Found ${count} new tracks (${all.length} total)` : "No new tracks found — check the folder contains supported audio files (.mp3, .flac, .m4a, .ogg, .wav, etc.)" });
+      onTracksLoaded(all);
       await save("scanFolderPath", scanPath.trim());
     } catch (e) { setScanResult({ type: "error", text: String(e) }); }
     setScanning(false);
   }, [scanPath, onTracksLoaded, save]);
+
+  const handleDebugScan = useCallback(async () => {
+    if (!scanPath.trim()) return; setDebugScanning(true); setScanResult(null);
+    try {
+      const result = await invoke<{ path: string; exists: boolean; is_dir: boolean; files_found: number; tracks_parsed: number; errors: string[] }>("debug_scan", { path: scanPath.trim() });
+      const lines = [
+        `Path: ${result.path}`,
+        `Exists: ${result.exists}, IsDir: ${result.is_dir}`,
+        `Files found: ${result.files_found}`,
+        `Tracks parsed: ${result.tracks_parsed}`,
+      ];
+      if (result.errors.length > 0) {
+        lines.push(`Errors (${result.errors.length}):`);
+        for (const e of result.errors.slice(0, 10)) lines.push(`  - ${e}`);
+      }
+      setScanResult({ type: "debug", text: lines.join("\n") });
+    } catch (e) { setScanResult({ type: "error", text: String(e) }); }
+    setDebugScanning(false);
+  }, [scanPath]);
+
+  const handleScanDownloads = useCallback(async () => {
+    setScanning(true); setScanResult(null);
+    try {
+      // Always use the actual default download dir, not the stored setting
+      const dir = await invoke<string>("get_default_download_dir");
+      const totalNew = await LibraryManager.getInstance().scanDirectory(dir);
+      const all = LibraryManager.getInstance().getAllTracks();
+      setScanResult({ type: "success", text: totalNew > 0 ? `Found ${totalNew} new tracks (${all.length} total) in ${dir}` : `No new tracks found in ${dir} — all already imported or no supported files.` });
+      onTracksLoaded(all);
+    } catch (e) { setScanResult({ type: "error", text: String(e) }); }
+    setScanning(false);
+  }, [onTracksLoaded]);
 
   const styleVal = settings.backgroundStyle || "dark";
 
@@ -179,8 +214,17 @@ const SettingsView: React.FC<Props> = ({ onTracksLoaded }) => {
         <div style={{ display:"flex", gap:8, marginTop:8 }}>
           <input className="settings-input" style={{ flex:1 }} placeholder="Folder path e.g. C:\\Users\\user\\Music" value={scanPath} onChange={e => setScanPath(e.target.value)} onBlur={() => { if (scanPath.trim()) save("scanFolderPath", scanPath.trim()); }} />
           <button className="settings-btn primary" onClick={handleScan} disabled={scanning}>{scanning ? "Scanning..." : "Scan"}</button>
+          <button className="settings-btn" style={{ background:"var(--btn-hover-bg)",color:"var(--text-secondary)",border:"1px solid var(--glass-border-strong)",fontSize:"11px",padding:"6px 10px" }} onClick={handleDebugScan} disabled={debugScanning}>{debugScanning ? "..." : "Debug"}</button>
         </div>
-        {scanResult && <div style={{ marginTop:6, fontSize:13, display: "flex", alignItems: "center", gap: 4, color: scanResult.type === "success" ? "var(--color-success)" : "var(--color-error)" }}>{scanResult.type === "success" ? <IconCheck size={14} /> : <IconAlert size={14} />}{scanResult.text}</div>}
+        {scanResult && <div style={{ marginTop:6, fontSize:13, display: "flex", alignItems: "flex-start", gap: 4, color: scanResult.type === "success" ? "var(--color-success)" : scanResult.type === "debug" ? "var(--text-secondary)" : "var(--color-error)", whiteSpace: "pre-wrap" }}>{scanResult.type === "success" ? <IconCheck size={14} /> : scanResult.type === "debug" ? <span style={{fontSize:14}}>🔍</span> : <IconAlert size={14} />}{scanResult.text}</div>}
+        <p style={{ marginTop: 6, fontSize: 11, color: "var(--text-tertiary)" }}>Supported: .mp3, .flac, .m4a, .aac, .ogg, .opus, .wav, .wma, .aiff</p>
+        {downloadPath ? (
+          <div style={{ marginTop: 6 }}>
+            <button className="settings-btn" style={{ background:"var(--accent-primary)",color:"#fff",fontSize:"12px" }} onClick={handleScanDownloads} disabled={scanning}>
+              {scanning ? "Scanning..." : "📥 Scan Downloads (Desktop\\Music)"}
+            </button>
+          </div>
+        ) : null}
         <label className="settings-check"><input type="checkbox" checked={settings.autoScan==="true"} onChange={e => save("autoScan", e.target.checked?"true":"false")} /> Auto-scan on startup</label>
       </section>
 

@@ -494,12 +494,25 @@ fn get_audio_url(bvid: &str) -> Result<String, String> {
 
 // ─── Audio Download ───────────────────────────────────
 
+/// Sanitize a string for use as a filename (remove invalid Windows chars, trim).
+fn sanitize_filename(name: &str) -> String {
+    let invalid = ['<', '>', ':', '"', '/', '\\', '|', '?', '*', '\0'];
+    let mut s: String = name.chars().filter(|c| !invalid.contains(c)).collect();
+    // Trim whitespace and dots from ends
+    s = s.trim().trim_matches('.').to_string();
+    // Limit length (Windows MAX_PATH friendly)
+    if s.len() > 120 { s.truncate(120); }
+    if s.is_empty() { "Unknown".to_string() } else { s }
+}
+
 /// Download audio from a Bilibili video.
 /// If `download_dir` is provided, saves there instead of temp.
+/// If `file_name` is provided, uses it (sanitized) instead of bvid.
 /// Returns the path to the downloaded file.
 pub fn download_online_audio(
     bvid: &str,
     download_dir: Option<&str>,
+    file_name: Option<&str>,
 ) -> Result<String, String> {
     let out_dir = match download_dir {
         Some(d) if !d.is_empty() => PathBuf::from(d),
@@ -508,7 +521,7 @@ pub fn download_online_audio(
     std::fs::create_dir_all(&out_dir)
         .map_err(|e| format!("Cannot create dir: {}", e))?;
 
-    // Check cache first.
+    // Check cache first (by bvid prefix).
     if let Some(cached) = find_cached_audio(&out_dir, bvid) {
         return Ok(cached.to_string_lossy().to_string());
     }
@@ -527,7 +540,10 @@ pub fn download_online_audio(
         "m4a" // Default for Bilibili DASH audio.
     };
 
-    let out_path = out_dir.join(format!("{}.{}", bvid, ext));
+    let name = file_name
+        .map(|n| sanitize_filename(n))
+        .unwrap_or_else(|| bvid.to_string());
+    let out_path = out_dir.join(format!("{}.{}", name, ext));
 
     // Download the file.
     let client = http_client();
@@ -549,6 +565,23 @@ pub fn download_online_audio(
         .map_err(|e| format!("Download write failed: {}", e))?;
 
     Ok(out_path.to_string_lossy().to_string())
+}
+
+/// Write basic metadata (title, artist, album) to an M4A/MP4 file.
+/// Uses the ilst atom compatible with iTunes/QuickTime.
+pub fn write_m4a_metadata(file_path: &str, title: &str, artist: &str, album: &str) -> Result<(), String> {
+    // Re-read the tag that mp4ameta can find (if any), or create fresh metadata.
+    // We use a simple approach: create a minimal tag and write it.
+    let mut tag = mp4ameta::Tag::read_from_path(file_path)
+        .unwrap_or_else(|_| mp4ameta::Tag::new());
+
+    tag.set_title(title);
+    tag.set_artist(artist);
+    tag.set_album(album);
+    tag.set_album_artist(artist);
+
+    tag.write_to_path(file_path)
+        .map_err(|e| format!("Failed to write M4A metadata: {}", e))
 }
 
 fn find_cached_audio(dir: &Path, bvid: &str) -> Option<PathBuf> {
@@ -583,81 +616,79 @@ fn find_ytdlp() -> Result<Command, String> {
     if is_ytdlp_available() {
         let mut cmd = Command::new("yt-dlp");
         #[cfg(target_os = "windows")]
-        cmd.creation_flags(0x08000000); // CREATE_NO_WINDOW
+        cmd.creation_flags(0x08000000);
         cmd.stderr(std::process::Stdio::piped())
             .stdout(std::process::Stdio::piped());
         return Ok(cmd);
     }
     // Try python -m yt_dlp
-    let mut probe = Command::new("python");
-    #[cfg(target_os = "windows")]
-    probe.creation_flags(0x08000000);
-    let output = probe
-        .args(["-m", "yt_dlp", "--version"])
-        .output()
-        .unwrap_or_else(|_| std::process::Output {
-            status: std::process::ExitStatus::default(),
-            stdout: vec![],
-            stderr: vec![],
-        });
-    if output.status.success() {
-        let mut cmd = Command::new("python");
-        #[cfg(target_os = "windows")]
-        cmd.creation_flags(0x08000000);
-        cmd.arg("-m").arg("yt_dlp")
-            .stderr(std::process::Stdio::piped())
-            .stdout(std::process::Stdio::piped());
+    if let Ok(mut cmd) = try_python_ytdlp() {
         return Ok(cmd);
     }
 
-    // Auto-install: try pip install yt-dlp
-    let mut install = Command::new("pip");
-    #[cfg(target_os = "windows")]
-    install.creation_flags(0x08000000);
-    let result = install
-        .args(["install", "yt-dlp", "--quiet", "--disable-pip-version-check"])
-        .stderr(std::process::Stdio::piped())
-        .stdout(std::process::Stdio::piped())
-        .output();
+    // Auto-install using python -m pip (most reliable on Windows)
+    let installers: &[&[&str]] = &[
+        &["python", "-m", "pip", "install", "yt-dlp", "--quiet", "--disable-pip-version-check"],
+        &["python3", "-m", "pip", "install", "yt-dlp", "--quiet", "--disable-pip-version-check"],
+        &["pip", "install", "yt-dlp", "--quiet", "--disable-pip-version-check"],
+        &["pip3", "install", "yt-dlp", "--quiet", "--disable-pip-version-check"],
+    ];
 
-    if let Ok(out) = &result {
-        if out.status.success() && is_ytdlp_available() {
-            let mut cmd = Command::new("yt-dlp");
-            #[cfg(target_os = "windows")]
-            cmd.creation_flags(0x08000000);
-            cmd.stderr(std::process::Stdio::piped())
-                .stdout(std::process::Stdio::piped());
-            return Ok(cmd);
-        }
-    }
-
-    // Also try pip3 / python -m pip as fallback
-    for installer in &["pip3", "python"] {
-        let args: &[&str] = if *installer == "python" {
-            &["-m", "pip", "install", "yt-dlp", "--quiet", "--disable-pip-version-check"]
-        } else {
-            &["install", "yt-dlp", "--quiet", "--disable-pip-version-check"]
-        };
-        let mut cmd = Command::new(installer);
+    for args in installers {
+        let mut cmd = Command::new(args[0]);
         #[cfg(target_os = "windows")]
         cmd.creation_flags(0x08000000);
-        if let Ok(out) = cmd.args(args)
+        let result = cmd.args(&args[1..])
             .stderr(std::process::Stdio::piped())
             .stdout(std::process::Stdio::piped())
-            .output()
-        {
-            if out.status.success() && is_ytdlp_available() {
-                let mut cmd = Command::new("yt-dlp");
-                #[cfg(target_os = "windows")]
-                cmd.creation_flags(0x08000000);
-                cmd.stderr(std::process::Stdio::piped())
-                    .stdout(std::process::Stdio::piped());
-                return Ok(cmd);
+            .output();
+
+        if let Ok(out) = &result {
+            if out.status.success() {
+                // Check if yt-dlp is now available
+                if is_ytdlp_available() {
+                    let mut cmd = Command::new("yt-dlp");
+                    #[cfg(target_os = "windows")]
+                    cmd.creation_flags(0x08000000);
+                    cmd.stderr(std::process::Stdio::piped())
+                        .stdout(std::process::Stdio::piped());
+                    return Ok(cmd);
+                }
+                // Try python -m yt_dlp again after install
+                if let Ok(cmd) = try_python_ytdlp() {
+                    return Ok(cmd);
+                }
             }
         }
     }
 
-    Err("yt-dlp could not be found or auto-installed. Install it manually: pip install yt-dlp".to_string())
+    Err("yt-dlp is required for YouTube. Run: python -m pip install yt-dlp".to_string())
+}
+
+fn try_python_ytdlp() -> Result<Command, String> {
+    for py in &["python", "python3"] {
+        let mut probe = Command::new(py);
+        #[cfg(target_os = "windows")]
+        probe.creation_flags(0x08000000);
+        let output = probe
+            .args(["-m", "yt_dlp", "--version"])
+            .output()
+            .unwrap_or_else(|_| std::process::Output {
+                status: std::process::ExitStatus::default(),
+                stdout: vec![],
+                stderr: vec![],
+            });
+        if output.status.success() {
+            let mut cmd = Command::new(py);
+            #[cfg(target_os = "windows")]
+            cmd.creation_flags(0x08000000);
+            cmd.args(["-m", "yt_dlp"])
+                .stderr(std::process::Stdio::piped())
+                .stdout(std::process::Stdio::piped());
+            return Ok(cmd);
+        }
+    }
+    Err("python not found".to_string())
 }
 
 // ─── YouTube Search ───────────────────────────────────
@@ -781,9 +812,11 @@ fn run_ytdlp(query_or_url: &str, extra_args: &[&str]) -> Result<String, String> 
 
 /// Download audio from a YouTube URL using yt-dlp.
 /// Extracts best audio, converts to m4a.
+/// If file_name is provided, renames the downloaded file to that name.
 pub fn download_youtube_audio(
     url: &str,
     download_dir: Option<&str>,
+    file_name: Option<&str>,
 ) -> Result<String, String> {
     let out_dir = match download_dir {
         Some(d) if !d.is_empty() => PathBuf::from(d),
@@ -799,26 +832,33 @@ pub fn download_youtube_audio(
     run_ytdlp(
         url,
         &[
-            "-f", "bestaudio[ext=m4a]/bestaudio/best",
-            "--extract-audio",
-            "--audio-format", "m4a",
-            "--audio-quality", "0",
+            "-f", "bestaudio[ext=m4a]/bestaudio[ext=opus]/bestaudio/best",
             "-o", &out_template_str,
             "--no-playlist",
             "--no-warnings",
             "--no-check-certificate",
             "--socket-timeout", "30",
-            "-R", "3",           // retry 3 times
+            "-R", "3",
             "--fragment-retries", "3",
+            "--no-post-overwrites",
         ],
     )?;
 
-    // Find the downloaded file (we use %(id)s in template, but yt-dlp may append
-    // extra suffixes for some formats — look for any file starting with the video ID).
-    // Actually yt-dlp uses the exact template; but extract-audio may change the ext.
-    // Let's just scan the dir for the most recently created file matching our pattern.
     let downloaded = find_downloaded_file(&out_dir)
         .ok_or("Download completed but could not locate output file".to_string())?;
+
+    // Rename to desired filename if provided
+    if let Some(name) = file_name {
+        let ext = downloaded.extension()
+            .and_then(|e| e.to_str())
+            .unwrap_or("m4a");
+        let new_path = out_dir.join(format!("{}.{}", name, ext));
+        if new_path != downloaded {
+            std::fs::rename(&downloaded, &new_path)
+                .map_err(|e| format!("Failed to rename: {}", e))?;
+            return Ok(new_path.to_string_lossy().to_string());
+        }
+    }
 
     Ok(downloaded.to_string_lossy().to_string())
 }
@@ -854,15 +894,28 @@ fn find_downloaded_file(dir: &Path) -> Option<PathBuf> {
 
 /// Download audio from either Bilibili (bvid) or YouTube (url).
 /// `source` must be "bilibili" or "youtube".
+/// If title/artist are provided, writes metadata tags and uses title as filename.
 pub fn download_online_audio_unified(
     source: &str,
     id_or_url: &str,
     download_dir: Option<&str>,
+    title: Option<&str>,
+    artist: Option<&str>,
 ) -> Result<String, String> {
-    match source {
-        "youtube" => download_youtube_audio(id_or_url, download_dir),
-        _ => download_online_audio(id_or_url, download_dir),
+    let file_name = title.map(|t| sanitize_filename(t));
+    let file_path = match source {
+        "youtube" => download_youtube_audio(id_or_url, download_dir, file_name.as_deref()),
+        _ => download_online_audio(id_or_url, download_dir, file_name.as_deref()),
+    }?;
+
+    // Write metadata if provided
+    if let (Some(t), Some(a)) = (title, artist) {
+        if !t.is_empty() {
+            let _ = write_m4a_metadata(&file_path, t, a, source);
+        }
     }
+
+    Ok(file_path)
 }
 
 // ─── Image Proxy ──────────────────────────────────────

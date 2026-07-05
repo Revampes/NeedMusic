@@ -98,6 +98,71 @@ async fn scan_directory(
     Ok(result)
 }
 
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct DebugScanResult {
+    pub path: String,
+    pub exists: bool,
+    pub is_dir: bool,
+    pub files_found: usize,
+    pub tracks_parsed: usize,
+    pub errors: Vec<String>,
+}
+
+#[tauri::command]
+async fn debug_scan(path: String) -> Result<DebugScanResult, String> {
+    let p = std::path::Path::new(&path);
+    let exists = p.exists();
+    let is_dir = p.is_dir();
+    let mut files_found = 0usize;
+    let mut tracks_parsed = 0usize;
+    let mut errors: Vec<String> = Vec::new();
+
+    if exists && is_dir {
+        for entry in walkdir::WalkDir::new(&path)
+            .follow_links(false)
+            .into_iter()
+            .filter_map(|e| e.ok())
+            .filter(|e| e.file_type().is_file())
+        {
+            files_found += 1;
+            let file_path = entry.path();
+            let ext = file_path
+                .extension()
+                .and_then(|e| e.to_str())
+                .unwrap_or("");
+            let supported = ["mp3","flac","m4a","aac","ogg","opus","wav","wma","aiff"]
+                .contains(&ext.to_lowercase().as_str());
+
+            let note = if supported {
+                match scanner::parse_metadata(&file_path.to_string_lossy()) {
+                    Ok(_) => { tracks_parsed += 1; "OK".to_string() }
+                    Err(e) => {
+                        errors.push(format!("{}: {}", file_path.display(), e));
+                        "PARSE_ERR".to_string()
+                    }
+                }
+            } else {
+                format!("UNSUPPORTED (.{})", ext)
+            };
+            println!("[debug_scan] {} — {}", file_path.display(), note);
+        }
+    }
+
+    Ok(DebugScanResult {
+        path: path.clone(),
+        exists,
+        is_dir,
+        files_found,
+        tracks_parsed,
+        errors,
+    })
+}
+
+#[tauri::command]
+fn test_parse_m4a(file_path: String) -> Result<TrackMetadata, String> {
+    scanner::parse_metadata(&file_path)
+}
+
 #[tauri::command]
 async fn get_scan_status(state: State<'_, AppState>) -> Result<ScanStatus, String> {
     let status = state.scan_status.lock().map_err(|e| e.to_string())?;
@@ -424,13 +489,13 @@ async fn heartbeat_discord_rpc(
 
 // ─── Default Download Directory ──────────────────────────
 
-/// Returns the user's Music folder as the default download location
+/// Returns the user's Desktop\Music folder as the default download location
 /// for online music (Bilibili, YouTube). Falls back to %APPDATA%/NeedMusic/Music.
 #[tauri::command]
 fn get_default_download_dir() -> Result<String, String> {
-    // Try the system Music folder first.
-    if let Ok(music) = std::env::var("USERPROFILE") {
-        let music_path = std::path::PathBuf::from(&music).join("Music").join("NeedMusic");
+    // Try Desktop\Music first.
+    if let Ok(userprofile) = std::env::var("USERPROFILE") {
+        let music_path = std::path::PathBuf::from(&userprofile).join("Desktop").join("Music");
         return Ok(music_path.to_string_lossy().to_string());
     }
     // Fallback to APPDATA.
@@ -483,12 +548,16 @@ async fn download_online_audio(
     source: String,
     id_or_url: String,
     download_dir: Option<String>,
+    title: Option<String>,
+    artist: Option<String>,
 ) -> Result<String, String> {
     let s = source.clone();
     let i = id_or_url.clone();
     let d = download_dir.clone();
+    let t = title.clone();
+    let a = artist.clone();
     tokio::task::spawn_blocking(move || {
-        online::download_online_audio_unified(&s, &i, d.as_deref())
+        online::download_online_audio_unified(&s, &i, d.as_deref(), t.as_deref(), a.as_deref())
     })
     .await
     .map_err(|e| format!("Download task panicked: {}", e))?
@@ -972,6 +1041,8 @@ pub fn run() {
             register_hotkey,
             unregister_hotkey,
             get_registered_hotkeys,
+            debug_scan,
+            test_parse_m4a,
         ])
         .run(tauri::generate_context!())
         .expect("error while running NeedMusic");

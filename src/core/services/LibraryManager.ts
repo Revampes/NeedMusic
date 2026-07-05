@@ -27,6 +27,15 @@ interface ScanResult {
   errors: string[];
 }
 
+export interface DebugScanResult {
+  path: string;
+  exists: boolean;
+  is_dir: boolean;
+  files_found: number;
+  tracks_parsed: number;
+  errors: string[];
+}
+
 /**
  * Singleton LibraryManager — orchestrates library scanning, metadata
  * persistence, and in-memory track management.
@@ -53,6 +62,10 @@ export class LibraryManager {
 
   static resetInstance(): void {
     LibraryManager.instance = null;
+  }
+
+  static async debugScan(dirPath: string): Promise<DebugScanResult> {
+    return invoke<DebugScanResult>("debug_scan", { path: dirPath });
   }
 
   // ─── Observer Management ────────────────────────────────────

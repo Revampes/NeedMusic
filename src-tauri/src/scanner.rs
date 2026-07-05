@@ -423,46 +423,123 @@ fn parse_flac(path: &Path) -> Result<TrackMetadata, String> {
 }
 
 fn parse_m4a(path: &Path) -> Result<TrackMetadata, String> {
-    let tag = mp4ameta::Tag::read_from_path(path)
-        .map_err(|e| format!("M4A parse error: {}", e))?;
+    let tag = mp4ameta::Tag::read_from_path(path);
 
-    let title = tag.title().unwrap_or("Unknown").to_string();
-    let artist = tag.artist().unwrap_or("Unknown Artist").to_string();
-    let album = tag.album().unwrap_or("Unknown Album").to_string();
-    let album_artist = tag
-        .album_artist()
-        .map(|s| s.to_string())
-        .unwrap_or_else(|| artist.clone());
-    let genre = tag.genre().unwrap_or("").to_string();
+    match tag {
+        Ok(tag) => {
+            let title = tag.title().unwrap_or("Unknown").to_string();
+            let artist = tag.artist().unwrap_or("Unknown Artist").to_string();
+            let album = tag.album().unwrap_or("Unknown Album").to_string();
+            let album_artist = tag
+                .album_artist()
+                .map(|s| s.to_string())
+                .unwrap_or_else(|| artist.clone());
+            let genre = tag.genre().unwrap_or("").to_string();
+            let year = tag.year().and_then(|y| y.parse::<i32>().ok());
+            let track_number = tag.track_number().0.map(|n| n as u32);
+            let disc_number = tag.disk_number().0.map(|n| n as u32);
+            let duration_secs = tag.duration().unwrap_or(0.0);
+            let has_artwork = tag.artwork().is_some();
 
-    // mp4ameta v0.2: year() -> Option<&str>
-    let year = tag.year().and_then(|y| y.parse::<i32>().ok());
+            Ok(TrackMetadata {
+                file_path: path.to_string_lossy().to_string(),
+                title,
+                artist,
+                album,
+                album_artist,
+                duration_secs,
+                track_number,
+                disc_number,
+                genre,
+                year,
+                has_artwork,
+            })
+        }
+        Err(_) => {
+            // Fallback: Bilibili DASH audio has no MPEG-4 metadata atoms.
+            // Use the filename as title and extract duration from the container.
+            let file_name = path
+                .file_stem()
+                .and_then(|s| s.to_str())
+                .unwrap_or("Unknown");
+            let duration_secs = read_m4a_duration(path).unwrap_or(0.0);
 
-    // track_number() -> (Option<u16>, Option<u16>) = (num, total)
-    let track_number = tag.track_number().0.map(|n| n as u32);
+            Ok(TrackMetadata {
+                file_path: path.to_string_lossy().to_string(),
+                title: file_name.to_string(),
+                artist: String::from("Bilibili"),
+                album: String::from("Bilibili"),
+                album_artist: String::from("Bilibili"),
+                duration_secs,
+                track_number: None,
+                disc_number: None,
+                genre: String::from("Online"),
+                year: None,
+                has_artwork: false,
+            })
+        }
+    }
+}
 
-    // disk_number() -> (Option<u16>, Option<u16>) = (num, total)
-    let disc_number = tag.disk_number().0.map(|n| n as u32);
+/// Read M4A/MP4 container to extract duration from the mvhd atom.
+/// Handles bare DASH audio files without iTunes metadata.
+/// The moov atom is often at the end of the file (fast-start/web optimized).
+fn read_m4a_duration(path: &Path) -> Result<f64, String> {
+    use std::io::{Read, Seek, SeekFrom};
+    let mut f = std::fs::File::open(path).map_err(|e| format!("Cannot open: {}", e))?;
+    let file_len = f.seek(SeekFrom::End(0)).map_err(|e| format!("Seek error: {}", e))?;
 
-    // duration() -> Option<f64> (already in seconds)
-    let duration_secs = tag.duration().unwrap_or(0.0);
+    // Read the last 8KB where moov typically lives in streaming-optimized files.
+    let tail_size = file_len.min(8192) as usize;
+    f.seek(SeekFrom::Start(file_len.saturating_sub(tail_size as u64)))
+        .map_err(|e| format!("Seek error: {}", e))?;
+    let mut buf = vec![0u8; tail_size];
+    f.read_exact(&mut buf).map_err(|e| format!("Read error: {}", e))?;
 
-    // artwork() -> Option<&ArtworkData>
-    let has_artwork = tag.artwork().is_some();
+    // Find "moov" atom in the tail.
+    let moov_pos = find_atom(&buf, b"moov", 0).ok_or("No moov atom found")?;
+    let mvhd_pos = find_atom(&buf, b"mvhd", moov_pos).ok_or("No mvhd atom found")?;
 
-    Ok(TrackMetadata {
-        file_path: path.to_string_lossy().to_string(),
-        title,
-        artist,
-        album,
-        album_artist,
-        duration_secs,
-        track_number,
-        disc_number,
-        genre,
-        year,
-        has_artwork,
-    })
+    // mvhd layout: 4B size, 4B 'mvhd', 1B version, 3B flags,
+    // then 4B (v0) or 8B (v1) creation time, modification time, timescale, duration.
+    let data_start = mvhd_pos + 8;
+    if data_start + 24 > buf.len() {
+        return Err("mvhd atom truncated".into());
+    }
+    let version = buf[data_start];
+    let (timescale, duration) = if version == 1 {
+        let ts = u64::from_be_bytes(buf[data_start + 12..data_start + 20].try_into().unwrap());
+        let dur = u64::from_be_bytes(buf[data_start + 20..data_start + 28].try_into().unwrap());
+        (ts, dur)
+    } else {
+        let ts = u32::from_be_bytes(buf[data_start + 12..data_start + 16].try_into().unwrap()) as u64;
+        let dur = u32::from_be_bytes(buf[data_start + 16..data_start + 20].try_into().unwrap()) as u64;
+        (ts, dur)
+    };
+
+    if timescale > 0 {
+        Ok(duration as f64 / timescale as f64)
+    } else {
+        Ok(0.0)
+    }
+}
+
+/// Find a 4-character atom identifier in the buffer, starting from offset.
+/// Returns offset of the atom's size field (4 bytes before the identifier).
+fn find_atom(buf: &[u8], id: &[u8; 4], start: usize) -> Option<usize> {
+    let mut pos = start;
+    while pos + 8 <= buf.len() {
+        if &buf[pos + 4..pos + 8] == id {
+            return Some(pos);
+        }
+        let size = u32::from_be_bytes([buf[pos], buf[pos + 1], buf[pos + 2], buf[pos + 3]]);
+        if size == 0 || size < 8 {
+            pos += 1;
+        } else {
+            pos += size as usize;
+        }
+    }
+    None
 }
 
 fn parse_wav(path: &Path) -> Result<TrackMetadata, String> {
@@ -662,4 +739,24 @@ pub fn extract_artwork_to_temp(file_path: &str) -> Result<Option<String>, String
     img.save(&output_path).map_err(|e| e.to_string())?;
 
     Ok(Some(output_path.to_string_lossy().to_string()))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_parse_m4a_files() {
+        let files = [
+            r"C:\Users\user\Music\NeedMusic\BV1Ai421a71N.m4a",
+            r"C:\Users\user\Music\NeedMusic\BV1FN411n7FT.m4a",
+            r"C:\Users\user\Music\NeedMusic\BV1Ub411p76Z.m4a",
+        ];
+        for f in &files {
+            match parse_metadata(f) {
+                Ok(meta) => println!("OK: {} — title: '{}', artist: '{}', duration: {:.1}s", f, meta.title, meta.artist, meta.duration_secs),
+                Err(e) => println!("FAIL: {} — {}", f, e),
+            }
+        }
+    }
 }

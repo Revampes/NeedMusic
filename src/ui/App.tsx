@@ -23,8 +23,10 @@ import {
   IconLibrary, IconHeart, IconHeartFill, IconPlaylist, IconSettings,
   IconMusic, IconImage, IconPrevious, IconPlay, IconPause, IconNext, IconStop,
   IconRepeatOff, IconRepeat, IconRepeatOne, IconShuffle, IconVolume,
-  IconClock, IconPlus, IconDisc, IconMic, IconGlobe, IconClose,
+  IconClock, IconPlus, IconDisc, IconMic, IconGlobe, IconClose, IconHome,
 } from "@ui/components/Icons";
+import SplashScreen from "@ui/components/SplashScreen";
+import HomeView from "@ui/components/HomeView";
 import "./styles/design-tokens.css";
 import "./styles/global.css";
 
@@ -32,12 +34,14 @@ const SPEED_OPTIONS = [0.5, 0.75, 1.0, 1.25, 1.5, 2.0];
 const FILTERS = ["All", "Title", "Artist", "Album", "Genre"];
 
 const App: React.FC = () => {
+  // v2 — Splash animation + Home page
   const bgCanvasRef = useRef<HTMLCanvasElement>(null);
   const [bgClass, setBgClass] = useState("");
   const [ready, setReady] = useState(false);
+  const [splashFading, setSplashFading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [tracks, setTracks] = useState<Track[]>([]);
-  const [activeTab, setActiveTab] = useState("Tracks");
+  const [activeTab, setActiveTab] = useState("Home");
   const [searchQuery, setSearchQuery] = useState("");
   const [filterField, setFilterField] = useState("All");
   const [player, setPlayer] = useState<PlayerState>({
@@ -46,6 +50,7 @@ const App: React.FC = () => {
     repeatMode: RepeatMode.Off, isShuffled: false, isFavorite: false, buffering: false,
   });
   const engine = useMemo(() => PlaybackEngine.getInstance(), []);
+  const splashStartRef = useRef(performance.now());
   const keydownCleanupRef = useRef<(() => void) | null>(null);
   const hotkeyUnlistenRef = useRef<(() => void) | null>(null);
 
@@ -303,8 +308,17 @@ const App: React.FC = () => {
         }
       });
       clearTimeout(timeoutId);
-      setReady(true);
-      console.log("[NeedMusic] App ready.");
+      // Ensure splash screen is visible for at least 2.5 seconds
+      const minSplashMs = 2500;
+      const elapsed = performance.now() - splashStartRef.current;
+      const remaining = Math.max(0, minSplashMs - elapsed);
+      setTimeout(() => {
+        setSplashFading(true);
+        setTimeout(() => {
+          setReady(true);
+          console.log("[NeedMusic] App ready.");
+        }, 500); // fade-out duration
+      }, remaining);
     }).catch((err) => {
       clearTimeout(timeoutId);
       const msg = String(err);
@@ -361,33 +375,12 @@ const App: React.FC = () => {
   }, [engine]);
 
   if (error) return (
-    <div className="splash-screen" style={{ color: "#e94560", flexDirection: "column", gap: "16px" }}>
-      <div style={{ textAlign: "center" }}>
-        <h1 style={{ marginBottom: 12 }}><IconMusic size={32} style={{ marginRight: 8 }} />NeedMusic</h1>
-        <p style={{ color: "#e94560", marginBottom: 8, fontWeight: 600 }}>Startup Failed</p>
-        <p style={{ color: "#888", fontSize: 13, maxWidth: 400, lineHeight: 1.5, whiteSpace: "pre-wrap" }}>{error}</p>
-        <button
-          onClick={() => { setError(null); setReady(false); window.location.reload(); }}
-          style={{
-            marginTop: 16, padding: "8px 20px", background: "#e94560", color: "#fff",
-            border: "none", borderRadius: 6, cursor: "pointer", fontSize: 14, fontWeight: 600
-          }}
-        >
-          Retry
-        </button>
-      </div>
-    </div>
+    <SplashScreen
+      error={error}
+      onRetry={() => { setError(null); setReady(false); window.location.reload(); }}
+    />
   );
-  if (!ready) return (
-    <div className="splash-screen">
-      <div style={{ textAlign: "center" }}>
-        <h1 style={{ marginBottom: 12 }}><IconMusic size={32} style={{ marginRight: 8 }} />NeedMusic</h1>
-        <p style={{ color: "#888", fontSize: 14 }}>Initializing...</p>
-        <p style={{ color: "#555", fontSize: 11, marginTop: 4 }}>Setting up database and audio engine</p>
-        <div className="splash-spinner" />
-      </div>
-    </div>
-  );
+  if (!ready) return <SplashScreen fading={splashFading} />;
 
   const ct = player.currentTrack;
   const isPlaying = player.playbackState === PlaybackState.Playing;
@@ -399,6 +392,7 @@ const App: React.FC = () => {
       <canvas ref={bgCanvasRef} className={`bg-canvas ${bgClass}`} />
       <div className="app-layout" onContextMenu={handleContextMenu}>
         <nav className="icon-sidebar">
+          <div className={`icon-nav-item ${activeTab === "Home" ? "active" : ""}`} onClick={() => setActiveTab("Home")} title="Home"><IconHome size={18} /></div>
           <div className={`icon-nav-item ${activeTab === "Tracks" ? "active" : ""}`} onClick={() => setActiveTab("Tracks")} title="Tracks"><IconLibrary size={18} /></div>
           <div className={`icon-nav-item ${activeTab === "Albums" ? "active" : ""}`} onClick={() => setActiveTab("Albums")} title="Albums"><IconDisc size={18} /></div>
           <div className={`icon-nav-item ${activeTab === "Artists" ? "active" : ""}`} onClick={() => setActiveTab("Artists")} title="Artists"><IconMic size={18} /></div>
@@ -430,7 +424,8 @@ const App: React.FC = () => {
             </div>
           )}
           <div className="content-area">
-            {activeTab === "Albums" ? <AlbumsView tracks={filteredTracks} onPlay={handlePlayTrack} /> :
+            {activeTab === "Home" ? <HomeView tracks={tracks} currentTrack={ct as Track | null} onPlay={handlePlayTrack} /> :
+             activeTab === "Albums" ? <AlbumsView tracks={filteredTracks} onPlay={handlePlayTrack} /> :
              activeTab === "Artists" ? <ArtistsView tracks={filteredTracks} /> :
              activeTab === "Playlists" ? <PlaylistsView tracks={tracks} /> :
              activeTab === "Online" ? (

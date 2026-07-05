@@ -70,6 +70,8 @@ export class OnlineMusicService {
       source: item.source,
       idOrUrl: item.source === "youtube" ? item.url : item.bvid,
       downloadDir: null,
+      title: item.title,
+      artist: item.author,
     });
 
     return this.buildTrack(item, filePath);
@@ -83,13 +85,12 @@ export class OnlineMusicService {
     item: OnlineSearchItem,
     musicFolder: string,
   ): Promise<Track> {
-    const sourceLabel = item.source === "youtube" ? "YouTube" : "Bilibili";
-    const saveDir = `${musicFolder}/${sourceLabel}`;
-
     const filePath = await invoke<string>("download_online_audio", {
       source: item.source,
       idOrUrl: item.source === "youtube" ? item.url : item.bvid,
-      downloadDir: saveDir,
+      downloadDir: musicFolder,
+      title: item.title,
+      artist: item.author,
     });
 
     const track = this.buildTrack(item, filePath);
