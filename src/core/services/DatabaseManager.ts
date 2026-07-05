@@ -78,6 +78,13 @@ export class DatabaseManager {
       );
     `);
 
+    await this.db.execute(`
+      CREATE TABLE IF NOT EXISTS play_history (
+        date  TEXT PRIMARY KEY,
+        count INTEGER NOT NULL DEFAULT 1
+      );
+    `);
+
     this.initialized = true;
   }
 
@@ -247,6 +254,41 @@ export class DatabaseManager {
       "INSERT OR REPLACE INTO settings (key, value) VALUES ($1, $2)",
       [key, value]
     );
+  }
+
+  // ─── Play History ───────────────────────────────────────────
+
+  /**
+   * Records a play event for today's date (increments count).
+   */
+  async recordPlay(dateStr?: string): Promise<void> {
+    await this.ensureDb();
+    const date = dateStr ?? new Date().toISOString().slice(0, 10);
+    await this.db!.execute(
+      `INSERT INTO play_history (date, count) VALUES ($1, 1)
+       ON CONFLICT(date) DO UPDATE SET count = count + 1`,
+      [date]
+    );
+  }
+
+  /**
+   * Returns play history for the given date range as a Map of date → count.
+   * @param daysBack number of days to look back from today
+   */
+  async getPlayHistory(daysBack: number = 182): Promise<Map<string, number>> {
+    await this.ensureDb();
+    const since = new Date();
+    since.setDate(since.getDate() - daysBack);
+    const sinceStr = since.toISOString().slice(0, 10);
+    const rows: any[] = await this.db!.select(
+      "SELECT date, count FROM play_history WHERE date >= $1 ORDER BY date",
+      [sinceStr]
+    );
+    const map = new Map<string, number>();
+    for (const row of rows) {
+      map.set(row.date, row.count);
+    }
+    return map;
   }
 
   // ─── Helpers ────────────────────────────────────────────────

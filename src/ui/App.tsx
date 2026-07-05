@@ -128,11 +128,16 @@ const App: React.FC = () => {
       setTracks(LibraryManager.getInstance().getAllTracks());
       engine.subscribe({
         onStateChange: (s) => setPlayer((p) => ({ ...p, playbackState: s })),
-        onTrackChange: (t) => setPlayer((p) => ({
-          ...p, currentTrack: t, currentTimeSecs: 0,
-          durationSecs: t?.durationSecs ?? p.durationSecs,
-          isFavorite: (t as Track)?.isFavorite ?? false,
-        })),
+        onTrackChange: (t) => {
+          if (t) {
+            DatabaseManager.getInstance().recordPlay().catch(() => {});
+          }
+          setPlayer((p) => ({
+            ...p, currentTrack: t, currentTimeSecs: 0,
+            durationSecs: t?.durationSecs ?? p.durationSecs,
+            isFavorite: (t as Track)?.isFavorite ?? false,
+          }));
+        },
         onProgressChange: (cur, dur) => setPlayer((p) => ({
           ...p,
           currentTimeSecs: cur,

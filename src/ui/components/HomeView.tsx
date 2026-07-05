@@ -6,6 +6,7 @@ import {
   IconMusic, IconDisc, IconMic, IconPlaylist,
   IconPlay, IconHeart, IconHeartFill,
 } from "@ui/components/Icons";
+import Heatmap from "@ui/components/Heatmap";
 
 interface HomeViewProps {
   tracks: Track[];
@@ -93,6 +94,9 @@ const HomeView: React.FC<HomeViewProps> = ({ tracks, currentTrack, onPlay }) => 
           <div className="home-stat-label">Favorites</div>
         </div>
       </section>
+
+      {/* ── Listening Heatmap ──────────────────────── */}
+      <Heatmap />
 
       {/* ── Content Grid ────────────────────────────── */}
       <div className="home-content-grid">
