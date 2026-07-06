@@ -17,6 +17,14 @@ interface DayCell {
 const DAY_LABELS = ["", "Mon", "", "Wed", "", "Fri", ""];
 const MONTH_NAMES = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
 
+/** Formats a Date as "YYYY-MM-DD" in local time (avoids UTC timezone shifts). */
+function formatLocalDate(d: Date): string {
+  const y = d.getFullYear();
+  const m = String(d.getMonth() + 1).padStart(2, "0");
+  const day = String(d.getDate()).padStart(2, "0");
+  return `${y}-${m}-${day}`;
+}
+
 /**
  * Returns an intensity class (0-4) based on play count.
  */
@@ -64,10 +72,10 @@ const Heatmap: React.FC<HeatmapProps> = ({ weeks = 26 }) => {
     for (let i = 0; i < totalDays; i++) {
       const d = new Date(startDate);
       d.setDate(d.getDate() + i);
-      const dateStr = d.toISOString().slice(0, 10);
+      const dateStr = formatLocalDate(d);
       const dow = d.getDay(); // 0=Sun
       const weekIdx = Math.floor(i / 7);
-      const isToday = dateStr === today.toISOString().slice(0, 10);
+      const isToday = dateStr === formatLocalDate(today);
 
       cellsArr.push({
         date: dateStr,

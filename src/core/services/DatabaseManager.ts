@@ -2,6 +2,14 @@ import Database from "@tauri-apps/plugin-sql";
 import { ITrack, TrackId } from "@core/interfaces";
 import { Track } from "@core/models/Track";
 
+/** Formats a Date as "YYYY-MM-DD" in local time (avoids UTC timezone shifts). */
+function formatLocalDate(d: Date): string {
+  const y = d.getFullYear();
+  const m = String(d.getMonth() + 1).padStart(2, "0");
+  const day = String(d.getDate()).padStart(2, "0");
+  return `${y}-${m}-${day}`;
+}
+
 /**
  * Singleton DatabaseManager — handles all SQLite persistence for the app.
  * Stores track metadata, playlists, and user preferences.
@@ -263,7 +271,7 @@ export class DatabaseManager {
    */
   async recordPlay(dateStr?: string): Promise<void> {
     await this.ensureDb();
-    const date = dateStr ?? new Date().toISOString().slice(0, 10);
+    const date = dateStr ?? formatLocalDate(new Date());
     await this.db!.execute(
       `INSERT INTO play_history (date, count) VALUES ($1, 1)
        ON CONFLICT(date) DO UPDATE SET count = count + 1`,
@@ -279,7 +287,7 @@ export class DatabaseManager {
     await this.ensureDb();
     const since = new Date();
     since.setDate(since.getDate() - daysBack);
-    const sinceStr = since.toISOString().slice(0, 10);
+    const sinceStr = formatLocalDate(since);
     const rows: any[] = await this.db!.select(
       "SELECT date, count FROM play_history WHERE date >= $1 ORDER BY date",
       [sinceStr]
