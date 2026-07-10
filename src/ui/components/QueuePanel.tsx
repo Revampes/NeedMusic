@@ -1,21 +1,25 @@
-import React, { useState, useEffect, useCallback, useRef } from "react";
+import React, { useState, useEffect, useCallback } from "react";
 import { PlaybackEngine } from "@core/services/PlaybackEngine";
 import { LibraryManager } from "@core/services/LibraryManager";
 import { ITrack } from "@core/interfaces";
 import { IconPlay, IconClose } from "@ui/components/Icons";
 import MarqueeText from "@ui/components/MarqueeText";
 
+interface QueuePanelProps {
+  /** Optional track lookup — when provided, used instead of LibraryManager. */
+  libraryTracks?: ITrack[];
+}
+
 /**
  * QueuePanel — always-visible right-side panel showing the play queue.
  * Supports drag-to-reorder, drag-in from track list, and per-track removal.
  */
-const QueuePanel: React.FC = () => {
+const QueuePanel: React.FC<QueuePanelProps> = ({ libraryTracks }) => {
   const engine = PlaybackEngine.getInstance();
   const lib = LibraryManager.getInstance();
   const [queue, setQueue] = useState<ITrack[]>([]);
   const [dragIdx, setDragIdx] = useState<number | null>(null);
   const [dragOver, setDragOver] = useState(false);
-  const panelRef = useRef<HTMLElement>(null);
 
   const refresh = useCallback(() => setQueue(engine.queueTracks), [engine]);
 
@@ -29,68 +33,6 @@ const QueuePanel: React.FC = () => {
     });
     return unsub;
   }, [engine, refresh]);
-
-  // ── Native drop zone listeners (bypasses React synthetic event quirks) ──
-  useEffect(() => {
-    const el = panelRef.current;
-    if (!el) return;
-
-    let dragCounter = 0;
-
-    const onDragEnter = (e: DragEvent) => {
-      e.preventDefault();
-      e.stopPropagation();
-      dragCounter++;
-      if (e.dataTransfer) {
-        e.dataTransfer.dropEffect = "copy";
-      }
-      setDragOver(true);
-    };
-
-    const onDragOver = (e: DragEvent) => {
-      e.preventDefault();
-      e.stopPropagation();
-      if (e.dataTransfer) {
-        e.dataTransfer.dropEffect = "copy";
-      }
-    };
-
-    const onDragLeave = (e: DragEvent) => {
-      e.preventDefault();
-      dragCounter--;
-      if (dragCounter <= 0) {
-        setDragOver(false);
-        dragCounter = 0;
-      }
-    };
-
-    const onDrop = (e: DragEvent) => {
-      e.preventDefault();
-      e.stopPropagation();
-      setDragOver(false);
-      dragCounter = 0;
-      const trackId = e.dataTransfer?.getData("text/plain");
-      if (!trackId) return;
-      const allTracks = lib.getAllTracks();
-      const track = allTracks.find((t) => t.id === trackId);
-      if (track) {
-        engine.enqueue(track);
-        refresh();
-      }
-    };
-
-    el.addEventListener("dragenter", onDragEnter);
-    el.addEventListener("dragover", onDragOver);
-    el.addEventListener("dragleave", onDragLeave);
-    el.addEventListener("drop", onDrop);
-
-    return () => {
-      el.removeEventListener("dragenter", onDragEnter);
-      el.removeEventListener("dragover", onDragOver);
-      el.removeEventListener("dragleave", onDragLeave);
-      el.removeEventListener("drop", onDrop);
-    };
-  }, [engine, lib, refresh]);
 
   const handleRemove = (idx: number) => {
     engine.removeFromQueue(idx);
@@ -106,10 +48,8 @@ const QueuePanel: React.FC = () => {
   const handleDragStart = (idx: number) => setDragIdx(idx);
   const handleDragOverReorder = (e: React.DragEvent, idx: number) => {
     e.preventDefault();
-    const dt = (e.nativeEvent || e).dataTransfer;
-    // External drag (from track list): allow drop
     if (dragIdx === null) {
-      if (dt) dt.dropEffect = "copy";
+      e.dataTransfer.dropEffect = "copy";
       return;
     }
     if (dragIdx === idx) return;
@@ -123,12 +63,30 @@ const QueuePanel: React.FC = () => {
   };
   const handleDragEnd = () => setDragIdx(null);
 
+  // ── External drop handler ──
+  const handleExternalDrop = (e: React.DragEvent) => {
+    e.preventDefault();
+    e.stopPropagation();
+    setDragOver(false);
+    const trackId = e.dataTransfer.getData("text/plain");
+    if (!trackId) return;
+    const allTracks = libraryTracks ?? lib.getAllTracks();
+    const track = allTracks.find((t) => t.id === trackId);
+    if (track) {
+      engine.enqueue(track);
+      refresh();
+    }
+  };
+
   const currentIdx = engine.currentIndex_;
 
   return (
     <aside
-      ref={panelRef}
       className={`queue-panel ${dragOver ? "queue-panel-dragover" : ""}`}
+      onDragEnter={(e) => { e.preventDefault(); setDragOver(true); }}
+      onDragOver={(e) => { e.preventDefault(); e.dataTransfer.dropEffect = "copy"; }}
+      onDragLeave={(e) => { e.preventDefault(); setDragOver(false); }}
+      onDrop={handleExternalDrop}
     >
       <div className="queue-panel-header">
         <span>Queue ({queue.length})</span>

@@ -270,7 +270,7 @@ const WebApp: React.FC = () => {
             )}
           </div>
         </div>
-        <QueuePanel />
+        <QueuePanel libraryTracks={tracks as any} />
       </div>
       {/* Player Bar */}
       <div className="player-bar frosted-panel">
@@ -357,7 +357,13 @@ const TrackListView: React.FC<{
         No tracks yet. Click the <IconUpload size={14} /> upload button to import audio files.
       </div>
     ) : tracks.map((t) => (
-      <div key={t.id} className={`track-row ${currentTrack && (currentTrack as any).id === t.id ? "active" : ""}`} onDoubleClick={() => onPlay(t)}>
+      <div key={t.id} className={`track-row ${currentTrack && (currentTrack as any).id === t.id ? "active" : ""}`}
+        draggable
+        onDragStart={(e) => {
+          e.dataTransfer.setData("text/plain", t.id);
+          e.dataTransfer.effectAllowed = "copy";
+        }}
+        onDoubleClick={() => onPlay(t)}>
         <span className="col-fav fav-btn" onClick={(e) => { e.stopPropagation(); onToggleFav(t); }}>
           {t.isFavorite ? <IconHeartFill size={13} /> : <IconHeart size={13} />}
         </span>

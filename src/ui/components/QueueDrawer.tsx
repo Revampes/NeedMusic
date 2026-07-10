@@ -53,7 +53,7 @@ const QueueDrawer: React.FC<{
 
         {queue.length === 0 ? (
           <div className="queue-empty">
-            Queue is empty. Double-click a track to start playing.
+            Queue is empty. Drag tracks here or click + to add.
           </div>
         ) : (
           <div className="queue-list">

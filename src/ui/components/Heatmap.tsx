@@ -1,8 +1,9 @@
-import React, { useEffect, useState, useMemo } from "react";
+import React, { useEffect, useState, useMemo, useCallback } from "react";
+import { createPortal } from "react-dom";
 import { DatabaseManager } from "@core/services/DatabaseManager";
 
 interface HeatmapProps {
-  /** Number of weeks to display (each week = 7 days). Default 26 (~6 months). */
+  /** Optional override for number of weeks. Auto-computed to cover the full calendar year by default. */
   weeks?: number;
 }
 
@@ -12,6 +13,7 @@ interface DayCell {
   dayOfWeek: number; // 0=Sun, 1=Mon, ..., 6=Sat
   weekIndex: number;
   isToday: boolean;
+  isFuture: boolean;
 }
 
 const DAY_LABELS = ["", "Mon", "", "Wed", "", "Fri", ""];
@@ -38,80 +40,109 @@ function getIntensity(count: number): number {
 
 /**
  * GitHub-style contribution heatmap for listening activity.
+ * Columns = calendar weeks (Mon–Sun), always ending with the current week.
  */
-const Heatmap: React.FC<HeatmapProps> = ({ weeks = 26 }) => {
+const Heatmap: React.FC<HeatmapProps> = ({ weeks: weeksOverride }) => {
   const [history, setHistory] = useState<Map<string, number>>(new Map());
   const [tooltip, setTooltip] = useState<{ date: string; count: number; x: number; y: number } | null>(null);
 
+  const todayStr = useMemo(() => formatLocalDate(new Date()), []);
+
+  // Compute the calendar-anchored week count (always starts from Jan 1 week)
+  const totalWeeks = useMemo(() => {
+    if (weeksOverride !== undefined) return weeksOverride;
+    const year = new Date().getFullYear();
+    const jan1 = new Date(year, 0, 1);
+    const jan1Dow = jan1.getDay();
+    const jan1MondayOffset = jan1Dow === 0 ? 6 : jan1Dow - 1;
+    const start = new Date(jan1);
+    start.setDate(jan1.getDate() - jan1MondayOffset);
+    const dec31 = new Date(year, 11, 31);
+    const dec31Dow = dec31.getDay();
+    const dec31SundayOffset = dec31Dow === 0 ? 0 : 7 - dec31Dow;
+    const end = new Date(dec31);
+    end.setDate(dec31.getDate() + dec31SundayOffset);
+    return Math.ceil((end.getTime() - start.getTime()) / 86_400_000 / 7);
+  }, [weeksOverride]);
+
   useEffect(() => {
     let cancelled = false;
-    DatabaseManager.getInstance().getPlayHistory(weeks * 7).then((map) => {
+    DatabaseManager.getInstance().getPlayHistory(totalWeeks * 7).then((map) => {
       if (!cancelled) setHistory(map);
     }).catch(() => {});
     return () => { cancelled = true; };
-  }, [weeks]);
+  }, [totalWeeks]);
 
-  // Build the grid of day cells
+  // Build the grid — anchored to Jan 1, covers the full calendar year
   const { cells, monthLabels } = useMemo(() => {
     const today = new Date();
     today.setHours(0, 0, 0, 0);
+    const year = today.getFullYear();
 
-    // Align to the start of the week (Monday)
-    const dayOfWeek = today.getDay(); // 0=Sun
-    const mondayOffset = dayOfWeek === 0 ? 6 : dayOfWeek - 1; // days since Monday
-    const startDate = new Date(today);
-    startDate.setDate(startDate.getDate() - (weeks * 7 - 1) - mondayOffset);
-    // Align startDate to Monday
-    const startDow = startDate.getDay();
-    const startMondayOffset = startDow === 0 ? 6 : startDow - 1;
-    startDate.setDate(startDate.getDate() - startMondayOffset);
+    // Monday of the week containing Jan 1
+    const jan1 = new Date(year, 0, 1);
+    const jan1Dow = jan1.getDay();
+    const jan1MondayOffset = jan1Dow === 0 ? 6 : jan1Dow - 1;
+    const startDate = new Date(jan1);
+    startDate.setDate(jan1.getDate() - jan1MondayOffset);
+
+    // Sunday of the week containing Dec 31
+    const dec31 = new Date(year, 11, 31);
+    const dec31Dow = dec31.getDay();
+    const dec31SundayOffset = dec31Dow === 0 ? 0 : 7 - dec31Dow;
+    const endDate = new Date(dec31);
+    endDate.setDate(dec31.getDate() + dec31SundayOffset);
+
+    const msPerDay = 86_400_000;
+    const computedWeeks = Math.ceil((endDate.getTime() - startDate.getTime()) / msPerDay / 7);
+    const displayWeeks = weeksOverride ?? computedWeeks;
+    const totalDays = displayWeeks * 7;
 
     const cellsArr: DayCell[] = [];
-    const totalDays = weeks * 7;
 
     for (let i = 0; i < totalDays; i++) {
       const d = new Date(startDate);
       d.setDate(d.getDate() + i);
       const dateStr = formatLocalDate(d);
-      const dow = d.getDay(); // 0=Sun
+      const dowCell = d.getDay(); // 0=Sun
       const weekIdx = Math.floor(i / 7);
-      const isToday = dateStr === formatLocalDate(today);
+      const isToday = dateStr === todayStr;
+      const isFuture = d > today;
 
       cellsArr.push({
         date: dateStr,
-        count: history.get(dateStr) ?? 0,
-        dayOfWeek: dow,
+        count: isFuture ? 0 : (history.get(dateStr) ?? 0),
+        dayOfWeek: dowCell,
         weekIndex: weekIdx,
         isToday,
+        isFuture,
       });
     }
 
-    // Compute month labels: show month name at first week of each month
+    // Compute month labels: show month name at first column of each month
     const monthLbls: { label: string; weekIndex: number }[] = [];
+    let lastMonth = -1;
     for (const cell of cellsArr) {
-      if (cell.dayOfWeek === 1) { // Monday
-        const m = new Date(cell.date).getMonth();
-        const prev = monthLbls[monthLbls.length - 1];
-        if (!prev || new Date(cellsArr[(prev.weekIndex) * 7]?.date ?? "").getMonth() !== m) {
-          monthLbls.push({ label: MONTH_NAMES[m], weekIndex: cell.weekIndex });
-        }
+      const m = new Date(cell.date + "T00:00:00").getMonth();
+      if (m !== lastMonth) {
+        lastMonth = m;
+        monthLbls.push({ label: MONTH_NAMES[m], weekIndex: cell.weekIndex });
       }
     }
 
     return { cells: cellsArr, monthLabels: monthLbls };
-  }, [history, weeks]);
+  }, [history, todayStr, weeksOverride]);
 
-  // Group cells into a 2D grid: rows=days of week (Mon=1..Sun=0), cols=weeks
+  // Group cells into a 2D grid: rows=days of week (Mon=0..Sun=6), cols=weeks
   const grid = useMemo(() => {
-    // Map dayOfWeek to row: Mon=0, Tue=1, ..., Sun=6
     const dowToRow = (dow: number) => (dow === 0 ? 6 : dow - 1);
-    const g: (DayCell | null)[][] = Array.from({ length: 7 }, () => Array(weeks).fill(null));
+    const g: (DayCell | null)[][] = Array.from({ length: 7 }, () => Array(totalWeeks).fill(null));
     for (const cell of cells) {
       const row = dowToRow(cell.dayOfWeek);
       g[row][cell.weekIndex] = cell;
     }
     return g;
-  }, [cells, weeks]);
+  }, [cells, totalWeeks]);
 
   const totalPlays = useMemo(() => {
     let sum = 0;
@@ -119,11 +150,35 @@ const Heatmap: React.FC<HeatmapProps> = ({ weeks = 26 }) => {
     return sum;
   }, [history]);
 
+  const handleMouseEnter = useCallback((e: React.MouseEvent, cell: DayCell) => {
+    const rect = (e.target as HTMLElement).getBoundingClientRect();
+    setTooltip({
+      date: cell.date,
+      count: cell.count,
+      x: rect.left + rect.width / 2,
+      y: rect.top - 8,
+    });
+  }, []);
+
+  const handleMouseLeave = useCallback(() => setTooltip(null), []);
+
+  const tooltipPortal = tooltip
+    ? createPortal(
+        <div
+          className="heatmap-tooltip"
+          style={{ left: tooltip.x, top: tooltip.y }}
+        >
+          <strong>{tooltip.count} play{tooltip.count !== 1 ? "s" : ""}</strong> on {tooltip.date}
+        </div>,
+        document.body
+      )
+    : null;
+
   return (
     <div className="heatmap-wrapper">
       <div className="heatmap-header">
         <h3 className="heatmap-title">Listening Activity</h3>
-        <span className="heatmap-total">{totalPlays} plays in the last {weeks} weeks</span>
+        <span className="heatmap-total">{totalPlays} plays in {new Date().getFullYear()}</span>
       </div>
 
       <div className="heatmap-scroll">
@@ -131,7 +186,7 @@ const Heatmap: React.FC<HeatmapProps> = ({ weeks = 26 }) => {
           {/* Month labels row */}
           <div className="heatmap-month-row">
             <div className="heatmap-day-label-spacer" />
-            <div className="heatmap-months" style={{ gridTemplateColumns: `repeat(${weeks}, 13px)` }}>
+            <div className="heatmap-months" style={{ gridTemplateColumns: `repeat(${totalWeeks}, 13px)` }}>
               {monthLabels.map((ml, i) => (
                 <span
                   key={i}
@@ -151,23 +206,14 @@ const Heatmap: React.FC<HeatmapProps> = ({ weeks = 26 }) => {
                 <div key={i} className="heatmap-day-label">{label}</div>
               ))}
             </div>
-            <div className="heatmap-grid" style={{ gridTemplateColumns: `repeat(${weeks}, 13px)` }}>
+            <div className="heatmap-grid" style={{ gridTemplateColumns: `repeat(${totalWeeks}, 13px)` }}>
               {grid.map((row, rowIdx) =>
                 row.map((cell, colIdx) => (
                   <div
                     key={`${rowIdx}-${colIdx}`}
-                    className={`heatmap-cell intensity-${cell ? getIntensity(cell.count) : 0}${cell?.isToday ? " today" : ""}`}
-                    onMouseEnter={(e) => {
-                      if (!cell) return;
-                      const rect = (e.target as HTMLElement).getBoundingClientRect();
-                      setTooltip({
-                        date: cell.date,
-                        count: cell.count,
-                        x: rect.left + rect.width / 2,
-                        y: rect.top - 8,
-                      });
-                    }}
-                    onMouseLeave={() => setTooltip(null)}
+                    className={`heatmap-cell intensity-${cell ? getIntensity(cell.count) : 0}${cell?.isToday ? " today" : ""}${cell?.isFuture ? " future" : ""}`}
+                    onMouseEnter={cell ? (e) => handleMouseEnter(e, cell) : undefined}
+                    onMouseLeave={handleMouseLeave}
                   >
                     {cell?.isToday && <div className="heatmap-today-dot" />}
                   </div>
@@ -187,15 +233,7 @@ const Heatmap: React.FC<HeatmapProps> = ({ weeks = 26 }) => {
         <span className="heatmap-legend-label">More</span>
       </div>
 
-      {/* Tooltip */}
-      {tooltip && (
-        <div
-          className="heatmap-tooltip"
-          style={{ left: tooltip.x, top: tooltip.y }}
-        >
-          <strong>{tooltip.count} play{tooltip.count !== 1 ? "s" : ""}</strong> on {tooltip.date}
-        </div>
-      )}
+      {tooltipPortal}
     </div>
   );
 };

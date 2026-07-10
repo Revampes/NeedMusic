@@ -442,7 +442,7 @@ const App: React.FC = () => {
              <TrackListView tracks={filteredTracks} currentTrack={ct} onPlay={handlePlayTrack} onToggleFav={handleToggleFavorite} onRemove={handleRemoveTrack} />}
           </div>
         </div>
-        <QueuePanel />
+        <QueuePanel libraryTracks={tracks} />
       </div>
       <div className="player-bar frosted-panel">
         <div className="player-left">

@@ -24,6 +24,13 @@ export class PlaybackEngine {
   private queue: ITrack[] = [];
   private currentIndex: number = -1;
 
+  /**
+   * Holds the currently-playing track when it was started via {@link play}
+   * and is not in the queue.  When null the current track is read from the
+   * queue at {@link currentIndex}.
+   */
+  private _playingTrack: ITrack | null = null;
+
   private _state: PlaybackState = PlaybackState.Idle;
   private _volume: number = 1.0;
   private _playbackRate: number = 1.0;
@@ -89,6 +96,8 @@ export class PlaybackEngine {
   }
 
   get currentTrack(): ITrack | null {
+    // A track started via play() may live outside the queue.
+    if (this._playingTrack) return this._playingTrack;
     if (this.currentIndex < 0 || this.currentIndex >= this.queue.length) {
       return null;
     }
@@ -110,7 +119,8 @@ export class PlaybackEngine {
   // ─── Playback Controls ──────────────────────────────────────
 
   /**
-   * Load a track and start playback.
+   * Load a track and start playback without modifying the queue.
+   * Use {@link enqueue} or {@link setQueue} to manage the queue explicitly.
    */
   async play(track: ITrack): Promise<void> {
     if (!this.audioOutput) {
@@ -118,13 +128,14 @@ export class PlaybackEngine {
       return;
     }
 
-    // Find or add track to queue.
+    // If the track is already in the queue, sync currentIndex so
+    // next/previous navigation stays consistent.
     const existingIdx = this.queue.findIndex((t) => t.id === track.id);
     if (existingIdx >= 0) {
       this.currentIndex = existingIdx;
+      this._playingTrack = null; // playing from queue
     } else {
-      this.queue.push(track);
-      this.currentIndex = this.queue.length - 1;
+      this._playingTrack = track; // playing outside queue
     }
 
     await this.audioOutput.play(track.filePath);
@@ -155,6 +166,7 @@ export class PlaybackEngine {
     this.setState(PlaybackState.Stopped);
     this.stopProgressUpdates();
     this.currentIndex = -1;
+    this._playingTrack = null;
     this.notifyTrackChange();
     DiscordRpcService.getInstance().clearPresence();
   }
@@ -179,6 +191,7 @@ export class PlaybackEngine {
     const track = this.queue[nextIdx];
     if (track) {
       this.currentIndex = nextIdx;
+      this._playingTrack = null; // playing from queue now
       await this.audioOutput?.play(track.filePath);
       this.audioOutput?.setVolume(this._volume);
       this.setState(PlaybackState.Playing);
@@ -214,6 +227,7 @@ export class PlaybackEngine {
     const track = this.queue[prevIdx];
     if (track) {
       this.currentIndex = prevIdx;
+      this._playingTrack = null; // playing from queue now
       await this.audioOutput?.play(track.filePath);
       this.audioOutput?.setVolume(this._volume);
       this.setState(PlaybackState.Playing);
@@ -263,10 +277,12 @@ export class PlaybackEngine {
 
   enqueue(track: ITrack): void {
     this.queue.push(track);
+    this.notifyTrackChange();
   }
 
   enqueueAll(tracks: ITrack[]): void {
     this.queue.push(...tracks);
+    this.notifyTrackChange();
   }
 
   removeFromQueue(index: number): void {
@@ -278,6 +294,7 @@ export class PlaybackEngine {
     if (index < this.currentIndex) {
       this.currentIndex--;
     }
+    this.notifyTrackChange();
   }
 
   clearQueue(): void {
@@ -292,6 +309,7 @@ export class PlaybackEngine {
   async setQueue(tracks: ITrack[], startIndex: number = 0): Promise<void> {
     this.queue = [...tracks];
     this.currentIndex = Math.max(0, Math.min(startIndex, tracks.length - 1));
+    this._playingTrack = null; // playing from queue
     const track = this.queue[this.currentIndex];
     if (track) {
       await this.audioOutput?.play(track.filePath);
