@@ -682,6 +682,97 @@ fn parse_ogg(path: &Path) -> Result<TrackMetadata, String> {
 
 // ─── Artwork Extraction ───────────────────────────────────
 
+/// Write metadata tags back to an audio file.
+/// Supported formats: MP3 (ID3v2), FLAC (Vorbis comments), M4A/AAC (iTunes).
+pub fn write_metadata(
+    file_path: &str,
+    title: Option<&str>,
+    artist: Option<&str>,
+    album: Option<&str>,
+) -> Result<(), String> {
+    let path = Path::new(file_path);
+    let ext = path
+        .extension()
+        .and_then(|e| e.to_str())
+        .map(|e| e.to_lowercase())
+        .unwrap_or_default();
+
+    match ext.as_str() {
+        "mp3" => write_mp3_metadata(path, title, artist, album),
+        "flac" => write_flac_metadata(path, title, artist, album),
+        "m4a" | "aac" => write_m4a_metadata(path, title, artist, album),
+        _ => Err(format!(
+            "Writing metadata is not supported for .{} files",
+            ext
+        )),
+    }
+}
+
+fn write_mp3_metadata(
+    path: &Path,
+    title: Option<&str>,
+    artist: Option<&str>,
+    album: Option<&str>,
+) -> Result<(), String> {
+    let mut tag = id3::Tag::read_from_path(path).unwrap_or_else(|_| id3::Tag::new());
+    if let Some(t) = title {
+        tag.set_title(t);
+    }
+    if let Some(a) = artist {
+        tag.set_artist(a);
+    }
+    if let Some(a) = album {
+        tag.set_album(a);
+    }
+    tag.write_to_path(path, id3::Version::Id3v24)
+        .map_err(|e| format!("Failed to write ID3 tags: {}", e))
+}
+
+fn write_flac_metadata(
+    path: &Path,
+    title: Option<&str>,
+    artist: Option<&str>,
+    album: Option<&str>,
+) -> Result<(), String> {
+    let mut tag = metaflac::Tag::read_from_path(path)
+        .map_err(|e| format!("Failed to read FLAC tags: {}", e))?;
+    if let Some(t) = title {
+        tag.vorbis_comments_mut()
+            .set_title(vec![t.to_string()]);
+    }
+    if let Some(a) = artist {
+        tag.vorbis_comments_mut()
+            .set_artist(vec![a.to_string()]);
+    }
+    if let Some(a) = album {
+        tag.vorbis_comments_mut()
+            .set_album(vec![a.to_string()]);
+    }
+    tag.write_to_path(path)
+        .map_err(|e| format!("Failed to write FLAC tags: {}", e))
+}
+
+fn write_m4a_metadata(
+    path: &Path,
+    title: Option<&str>,
+    artist: Option<&str>,
+    album: Option<&str>,
+) -> Result<(), String> {
+    let mut tag = mp4ameta::Tag::read_from_path(path)
+        .map_err(|e| format!("Failed to read M4A tags: {}", e))?;
+    if let Some(t) = title {
+        tag.set_title(t);
+    }
+    if let Some(a) = artist {
+        tag.set_artist(a);
+    }
+    if let Some(a) = album {
+        tag.set_album(a);
+    }
+    tag.write_to_path(path)
+        .map_err(|e| format!("Failed to write M4A tags: {}", e))
+}
+
 /// Extract embedded album art to a temporary PNG file.
 pub fn extract_artwork_to_temp(file_path: &str) -> Result<Option<String>, String> {
     let path = Path::new(file_path);

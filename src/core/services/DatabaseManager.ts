@@ -161,6 +161,38 @@ export class DatabaseManager {
     return rows.length > 0;
   }
 
+  /** Update a track's metadata fields (title, artist, album) in the database. */
+  async updateTrackMetadata(
+    id: TrackId,
+    updates: { title?: string; artist?: string; album?: string }
+  ): Promise<void> {
+    await this.ensureDb();
+    const setClauses: string[] = [];
+    const values: any[] = [];
+    let idx = 1;
+
+    if (updates.title !== undefined) {
+      setClauses.push(`title = $${idx++}`);
+      values.push(updates.title);
+    }
+    if (updates.artist !== undefined) {
+      setClauses.push(`artist = $${idx++}`);
+      values.push(updates.artist);
+    }
+    if (updates.album !== undefined) {
+      setClauses.push(`album = $${idx++}`);
+      values.push(updates.album);
+    }
+
+    if (setClauses.length === 0) return;
+
+    values.push(id);
+    await this.db!.execute(
+      `UPDATE tracks SET ${setClauses.join(", ")} WHERE id = $${idx}`,
+      values
+    );
+  }
+
   // ─── Favorites ────────────────────────────────────────────
 
   async setFavorite(trackId: TrackId, fav: boolean): Promise<void> {

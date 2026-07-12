@@ -368,6 +368,21 @@ const App: React.FC = () => {
     setTracks(LibraryManager.getInstance().getAllTracks());
   }, [player.currentTrack, engine]);
 
+  const handleTitleChange = useCallback(async (track: Track, newTitle: string) => {
+    const db = DatabaseManager.getInstance();
+    // Persist to the audio file's metadata tags.
+    invoke("write_track_metadata", {
+      filePath: track.filePath,
+      title: newTitle,
+      artist: null,
+      album: null,
+    }).catch((err) => console.warn("[NeedMusic] Failed to write metadata to file:", err));
+    // Update the database.
+    await db.updateTrackMetadata(track.id, { title: newTitle });
+    // Update local state so the UI re-renders.
+    setTracks((prev) => [...prev]);
+  }, []);
+
   const handleContextMenu = useCallback((e: React.MouseEvent) => {
     e.preventDefault();
     CustomContextMenu.getInstance().show(e.clientX, e.clientY, [
@@ -439,7 +454,7 @@ const App: React.FC = () => {
                />
              ) :
              activeTab === "Settings" ? <SettingsView onTracksLoaded={setTracks} /> :
-             <TrackListView tracks={filteredTracks} currentTrack={ct} onPlay={handlePlayTrack} onToggleFav={handleToggleFavorite} onRemove={handleRemoveTrack} />}
+             <TrackListView tracks={filteredTracks} currentTrack={ct} onPlay={handlePlayTrack} onToggleFav={handleToggleFavorite} onRemove={handleRemoveTrack} onTitleChange={handleTitleChange} />}
           </div>
         </div>
         <QueuePanel libraryTracks={tracks} />
@@ -514,8 +529,35 @@ export default App;
 
 // ─── Sub-Views ────────────────────────────────────────
 
-const TrackListView: React.FC<{ tracks: Track[]; currentTrack: ITrack | null; onPlay: (t: Track) => void; onToggleFav: (t: Track) => void; onRemove: (t: Track) => void }> =
-  ({ tracks, currentTrack, onPlay, onToggleFav, onRemove }) => (
+const TrackListView: React.FC<{ tracks: Track[]; currentTrack: ITrack | null; onPlay: (t: Track) => void; onToggleFav: (t: Track) => void; onRemove: (t: Track) => void; onTitleChange: (t: Track, newTitle: string) => void }> =
+  ({ tracks, currentTrack, onPlay, onToggleFav, onRemove, onTitleChange }) => {
+    const [editingId, setEditingId] = React.useState<string | null>(null);
+    const [editValue, setEditValue] = React.useState("");
+
+    const startEdit = (t: Track) => {
+      setEditingId(t.id);
+      setEditValue(t.title);
+    };
+
+    const commitEdit = (t: Track) => {
+      const trimmed = editValue.trim();
+      if (trimmed && trimmed !== t.title) {
+        onTitleChange(t, trimmed);
+        t.title = trimmed; // optimistic UI update
+      }
+      setEditingId(null);
+    };
+
+    const handleKeyDown = (e: React.KeyboardEvent, t: Track) => {
+      if (e.key === "Enter") {
+        e.preventDefault();
+        commitEdit(t);
+      } else if (e.key === "Escape") {
+        setEditingId(null);
+      }
+    };
+
+    return (
     <div className="track-list">
       <div className="track-list-header">
         <span className="col-fav">#</span><span className="col-title">Title</span>
@@ -534,7 +576,29 @@ const TrackListView: React.FC<{ tracks: Track[]; currentTrack: ITrack | null; on
           onDoubleClick={() => onPlay(t)}
         >
           <span className="col-fav fav-btn" onClick={(e) => { e.stopPropagation(); onToggleFav(t); }}>{t.isFavorite ? <IconHeartFill size={13} /> : <IconHeart size={13} />}</span>
-          <span className="col-title"><span className="track-thumb">{t.hasArtwork ? <IconImage size={14} /> : <IconMusic size={14} />}</span><MarqueeText>{t.title}</MarqueeText></span>
+          <span className="col-title">
+            <span className="track-thumb">{t.hasArtwork ? <IconImage size={14} /> : <IconMusic size={14} />}</span>
+            {editingId === t.id ? (
+              <input
+                className="track-title-edit-input"
+                value={editValue}
+                onChange={(e) => setEditValue(e.target.value)}
+                onBlur={() => commitEdit(t)}
+                onKeyDown={(e) => handleKeyDown(e, t)}
+                autoFocus
+                onClick={(e) => e.stopPropagation()}
+                onDoubleClick={(e) => e.stopPropagation()}
+              />
+            ) : (
+              <span
+                className="track-title-text"
+                title="Click to edit title"
+                onClick={(e) => { e.stopPropagation(); startEdit(t); }}
+              >
+                <MarqueeText>{t.title}</MarqueeText>
+              </span>
+            )}
+          </span>
           <span className="col-artist"><MarqueeText>{t.artist}</MarqueeText></span>
           <span className="col-album"><MarqueeText>{t.album}</MarqueeText></span>
           <span className="col-dur">{t.formatDuration()}</span>
@@ -544,6 +608,7 @@ const TrackListView: React.FC<{ tracks: Track[]; currentTrack: ITrack | null; on
       ))}
     </div>
   );
+};
 
 const AlbumsView: React.FC<{ tracks: Track[]; onPlay: (t: Track) => void }> = ({ tracks, onPlay }) => {
   const albums = [...Album.groupByAlbum(tracks).values()];

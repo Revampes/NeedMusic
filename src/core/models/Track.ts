@@ -11,7 +11,7 @@ import {
 export class Track implements ITrack {
   public readonly id: TrackId;
   public readonly filePath: string;
-  public readonly title: string;
+  public title: string;
   public readonly artist: string;
   public readonly album: string;
   public readonly albumArtist: string;

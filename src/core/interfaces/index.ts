@@ -60,7 +60,7 @@ export interface ILibraryObserver {
 export interface ITrack {
   readonly id: TrackId;
   readonly filePath: string;
-  readonly title: string;
+  title: string;
   readonly artist: string;
   readonly album: string;
   readonly albumArtist: string;

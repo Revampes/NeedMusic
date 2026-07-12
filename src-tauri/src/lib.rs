@@ -487,6 +487,25 @@ async fn heartbeat_discord_rpc(
     .map_err(|e| format!("Discord RPC heartbeat panicked: {}", e))?
 }
 
+#[tauri::command]
+async fn write_track_metadata(
+    file_path: String,
+    title: Option<String>,
+    artist: Option<String>,
+    album: Option<String>,
+) -> Result<(), String> {
+    tokio::task::spawn_blocking(move || {
+        scanner::write_metadata(
+            &file_path,
+            title.as_deref(),
+            artist.as_deref(),
+            album.as_deref(),
+        )
+    })
+    .await
+    .map_err(|e| format!("Write metadata panicked: {}", e))?
+}
+
 // ─── Default Download Directory ──────────────────────────
 
 /// Returns the user's Desktop\Music folder as the default download location
@@ -1043,6 +1062,7 @@ pub fn run() {
             get_registered_hotkeys,
             debug_scan,
             test_parse_m4a,
+            write_track_metadata,
         ])
         .run(tauri::generate_context!())
         .expect("error while running NeedMusic");

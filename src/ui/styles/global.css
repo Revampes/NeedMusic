@@ -231,6 +231,10 @@ body,#root{height:100%;overflow:hidden;background:transparent;color:var(--text-b
 .track-row.active::before{background:var(--row-active-strip)}
 .col-fav{width:36px;text-align:center;font-size:14px;flex-shrink:0}.fav-btn:hover{transform:scale(1.2)}
 .col-title{flex:3;display:flex;align-items:center;gap:6px;color:var(--text-body);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.track-title-text{cursor:pointer;overflow:hidden;flex:1;min-width:0}
+.track-title-text:hover{color:var(--accent-primary)}
+.track-title-edit-input{flex:1;min-width:0;background:var(--input-bg);border:1px solid var(--accent-primary);border-radius:4px;color:var(--text-body);font-size:var(--text-md);padding:2px 6px;outline:none;font-family:inherit}
+.track-title-edit-input:focus{border-color:var(--accent-primary);box-shadow:0 0 0 2px rgba(99,102,241,0.2)}
 .track-thumb{font-size:15px;flex-shrink:0}
 .col-artist{flex:2;color:var(--text-secondary);font-size:var(--text-sm);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .col-album{flex:2;color:var(--text-tertiary);font-size:var(--text-sm);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
