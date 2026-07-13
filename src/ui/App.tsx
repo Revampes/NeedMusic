@@ -11,6 +11,7 @@ import { Track } from "@core/models/Track";
 import { Album } from "@core/models/Album";
 import { Artist } from "@core/models/Artist";
 import { BackgroundEngine } from "@core/utils/BackgroundEngine";
+import { DragBridge } from "@core/services/DragBridge";
 import { CustomContextMenu, ContextMenuEntry } from "@ui/components/CustomContextMenu";
 import ProgressBar from "@ui/components/ProgressBar";
 import PlaylistsView from "@ui/components/PlaylistsView";
@@ -44,6 +45,7 @@ const App: React.FC = () => {
   const [activeTab, setActiveTab] = useState("Home");
   const [searchQuery, setSearchQuery] = useState("");
   const [filterField, setFilterField] = useState("All");
+  const [queueVersion, setQueueVersion] = useState(0); // bumped on every queue mutation
   const [player, setPlayer] = useState<PlayerState>({
     currentTrack: null, playbackState: PlaybackState.Idle,
     currentTimeSecs: 0, durationSecs: 0, volume: 1, playbackRate: 1,
@@ -53,6 +55,7 @@ const App: React.FC = () => {
   const splashStartRef = useRef(performance.now());
   const keydownCleanupRef = useRef<(() => void) | null>(null);
   const hotkeyUnlistenRef = useRef<(() => void) | null>(null);
+  const dragCleanupRef = useRef<(() => void) | null>(null);
 
   useEffect(() => {
     let timedOut = false;
@@ -225,6 +228,50 @@ const App: React.FC = () => {
       document.addEventListener("keydown", handleKeyDown);
       keydownCleanupRef.current = () => document.removeEventListener("keydown", handleKeyDown);
 
+      // ── Mouse-event-based drag bridge (bypasses broken HTML5 DnD in Tauri/WebView2) ──
+      const handleMouseMove = (e: MouseEvent) => {
+        DragBridge.onMouseMove(e.clientX, e.clientY);
+      };
+      const handleMouseUp = (e: MouseEvent) => {
+        // WebView2 may fire spurious mouseup events from the cancelled HTML5 drag.
+        // Only act when a real drag (threshold passed) is in progress.
+        if (!DragBridge.isDragging) return;
+
+        // Defer to next tick so any delayed mousemove has a chance to settle.
+        const cx = e.clientX, cy = e.clientY;
+        setTimeout(() => {
+          try {
+            const trackId = DragBridge.endMouseDrag();
+            console.log("[App] mouseup — trackId:", trackId, "clientX:", cx, "clientY:", cy);
+            if (!trackId) return;
+
+            const el = document.elementFromPoint(cx, cy);
+            const queuePanel = el?.closest(".queue-panel") as HTMLElement | null;
+            console.log("[App] elementFromPoint:", el?.tagName, el?.className, "inQueue:", !!queuePanel);
+
+            if (queuePanel) {
+              const allTracks = LibraryManager.getInstance().getAllTracks();
+              const track = allTracks.find((t) => t.id === trackId);
+              console.log("[App] track lookup:", track?.title ?? "NOT FOUND");
+              if (track) {
+                engine.enqueue(track);
+                setQueueVersion(v => v + 1);
+                console.log("[App] Enqueued via mouse drag:", track.title, "— queue now:", engine.queueTracks.length);
+              }
+            }
+          } catch (err) {
+            console.error("[App] mouseup drag handler error:", err);
+            DragBridge.clear();
+          }
+        }, 0);
+      };
+      document.addEventListener("mousemove", handleMouseMove);
+      document.addEventListener("mouseup", handleMouseUp);
+      dragCleanupRef.current = () => {
+        document.removeEventListener("mousemove", handleMouseMove);
+        document.removeEventListener("mouseup", handleMouseUp);
+      };
+
       // ── Global Hotkey Actions (from Rust backend) ──
       try {
         const { listen } = await import("@tauri-apps/api/event");
@@ -330,7 +377,7 @@ const App: React.FC = () => {
       console.error("[NeedMusic] Initialization error:", msg, err);
       setError(msg);
     });
-    return () => { clearTimeout(timeoutId); if (islandInterval) clearInterval(islandInterval); keydownCleanupRef.current?.(); hotkeyUnlistenRef.current?.(); BackgroundEngine.getInstance().unmount(); };
+    return () => { clearTimeout(timeoutId); if (islandInterval) clearInterval(islandInterval); keydownCleanupRef.current?.(); hotkeyUnlistenRef.current?.(); dragCleanupRef.current?.(); BackgroundEngine.getInstance().unmount(); };
   }, [engine]);
 
   const filteredTracks = useMemo(() => {
@@ -457,7 +504,7 @@ const App: React.FC = () => {
              <TrackListView tracks={filteredTracks} currentTrack={ct} onPlay={handlePlayTrack} onToggleFav={handleToggleFavorite} onRemove={handleRemoveTrack} onTitleChange={handleTitleChange} />}
           </div>
         </div>
-        <QueuePanel libraryTracks={tracks} />
+        <QueuePanel libraryTracks={tracks} queueVersion={queueVersion} />
       </div>
       <div className="player-bar frosted-panel">
         <div className="player-left">
@@ -570,8 +617,22 @@ const TrackListView: React.FC<{ tracks: Track[]; currentTrack: ITrack | null; on
           className={`track-row ${currentTrack?.id === t.id ? "active" : ""}`}
           draggable
           onDragStart={(e) => {
+            console.log("[TrackRow] dragStart — track:", t.title, "id:", t.id);
+            // WebView2 workaround: set both "text/plain" and "Text" formats
             e.dataTransfer.setData("text/plain", t.id);
-            e.dataTransfer.effectAllowed = "copy";
+            e.dataTransfer.setData("Text", t.id);
+            // More permissive effectAllowed for WebView2 compatibility
+            e.dataTransfer.effectAllowed = "copyMove";
+            DragBridge.setDraggedTrackId(t.id);
+          }}
+          onDragEnd={() => { console.log("[TrackRow] dragEnd"); DragBridge.clear(); }}
+          onMouseDown={(e) => {
+            // Primary drag mechanism for Tauri/WebView2 (mouse-event-based)
+            // Only start on left mouse button and not on interactive children
+            if (e.button !== 0) return;
+            const target = e.target as HTMLElement;
+            if (target.closest("button, input, .fav-btn, .col-remove, .col-add")) return;
+            DragBridge.startMouseDrag(t.id, e.clientX, e.clientY);
           }}
           onDoubleClick={() => onPlay(t)}
         >

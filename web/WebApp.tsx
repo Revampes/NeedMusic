@@ -2,6 +2,7 @@ import React, { useEffect, useState, useCallback, useRef, useMemo } from "react"
 import { PlaybackEngine, PlaybackState, RepeatMode } from "@core/services/PlaybackEngine";
 import type { ITrack, PlayerState } from "@core/interfaces";
 import { BackgroundEngine } from "@core/utils/BackgroundEngine";
+import { DragBridge } from "@core/services/DragBridge";
 import ProgressBar from "@ui/components/ProgressBar";
 import QueuePanel from "@ui/components/QueuePanel";
 import MarqueeText from "@ui/components/MarqueeText";
@@ -361,8 +362,11 @@ const TrackListView: React.FC<{
         draggable
         onDragStart={(e) => {
           e.dataTransfer.setData("text/plain", t.id);
-          e.dataTransfer.effectAllowed = "copy";
+          e.dataTransfer.setData("Text", t.id);
+          e.dataTransfer.effectAllowed = "copyMove";
+          DragBridge.setDraggedTrackId(t.id);
         }}
+        onDragEnd={() => DragBridge.clear()}
         onDoubleClick={() => onPlay(t)}>
         <span className="col-fav fav-btn" onClick={(e) => { e.stopPropagation(); onToggleFav(t); }}>
           {t.isFavorite ? <IconHeartFill size={13} /> : <IconHeart size={13} />}
