@@ -235,7 +235,7 @@ body.nm-dragging .queue-panel-item { cursor: copy; }
 .track-list{flex:1;overflow-y:auto}
 .track-list-header{display:flex;align-items:center;padding:6px var(--space-2);font-size:var(--text-xs);font-weight:var(--weight-medium);color:var(--text-tertiary);text-transform:uppercase;letter-spacing:.5px;border-bottom:1px solid var(--glass-border);position:sticky;top:0;background:var(--overlay-bg);backdrop-filter:blur(var(--overlay-blur)) saturate(var(--overlay-saturate));z-index:var(--z-sticky)}
 .track-row{display:flex;align-items:center;padding:6px var(--space-2);font-size:var(--text-base);cursor:pointer;transition:background var(--transition-fast);border-radius:var(--radius-sm);margin:0 var(--space-1);position:relative;-webkit-user-select:none;user-select:none}
-.track-row[draggable="true"]{-webkit-user-select:auto;user-select:auto;-webkit-user-drag:element}
+.track-row[draggable="true"]{-webkit-user-select:none;user-select:none;-webkit-user-drag:element}
 .track-row::before{content:'';position:absolute;left:0;top:2px;bottom:2px;width:var(--row-active-strip-width);background:transparent;border-radius:0 var(--radius-sm) var(--radius-sm) 0;transition:background var(--transition-fast)}
 .track-row:hover{background:var(--row-hover-bg)}
 .track-row.active{background:var(--row-active-bg)}

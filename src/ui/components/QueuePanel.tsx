@@ -25,20 +25,13 @@ const QueuePanel: React.FC<QueuePanelProps> = ({ libraryTracks, queueVersion }) 
   const [dragOver, setDragOver] = useState(false);
   const dragEnterCounter = useRef(0);
 
-  const refresh = useCallback(() => {
-    const q = engine.queueTracks;
-    console.log("[QueuePanel] refresh — queue length:", q.length);
-    setQueue(q);
-  }, [engine]);
+  const refresh = useCallback(() => setQueue(engine.queueTracks), [engine]);
 
   useEffect(() => {
     refresh();
     const unsub = engine.subscribe({
       onStateChange: () => {},
-      onTrackChange: () => {
-        console.log("[QueuePanel] onTrackChange fired, queue length:", engine.queueTracks.length);
-        refresh();
-      },
+      onTrackChange: () => refresh(),
       onProgressChange: () => {},
       onVolumeChange: () => {},
     });
@@ -48,10 +41,20 @@ const QueuePanel: React.FC<QueuePanelProps> = ({ libraryTracks, queueVersion }) 
   // Direct refresh when parent bumps queueVersion (bypasses observer timing issues)
   useEffect(() => {
     if (queueVersion !== undefined && queueVersion > 0) {
-      console.log("[QueuePanel] queueVersion bump:", queueVersion);
       refresh();
     }
   }, [queueVersion]);
+
+  // ── Reset dragOver when ANY HTML5 drag ends (dragEnd fires on source, not target) ──
+  // WebView2 cancels drags immediately, so dragLeave may never fire on the queue panel.
+  useEffect(() => {
+    const reset = () => {
+      dragEnterCounter.current = 0;
+      setDragOver(false);
+    };
+    document.addEventListener("dragend", reset);
+    return () => document.removeEventListener("dragend", reset);
+  }, []);
 
   const handleRemove = (idx: number) => {
     engine.removeFromQueue(idx);
@@ -83,34 +86,41 @@ const QueuePanel: React.FC<QueuePanelProps> = ({ libraryTracks, queueVersion }) 
   const handleDragEnd = () => setDragIdx(null);
 
   // ── External drop handler ──
+  // Handles both HTML5 DnD (web builds) and mouse-event-based drag (Tauri/WebView2).
   const handleExternalDrop = (e: React.DragEvent) => {
-    console.log("[QueuePanel] onDrop fired, dataTransfer.types:", Array.from(e.dataTransfer.types));
     e.preventDefault();
     e.stopPropagation();
     dragEnterCounter.current = 0;
     setDragOver(false);
 
-    // Use DragBridge instead of dataTransfer — WebView2 has unreliable
-    // dataTransfer support for internal drag-and-drop.
-    const bridgeId = DragBridge.takeDraggedTrackId();
-    console.log("[QueuePanel] DragBridge ID:", bridgeId);
-    // WebView2: try both "text/plain" and "Text" (capital T) formats
-    const dtId = e.dataTransfer.getData("text/plain") || e.dataTransfer.getData("Text");
-    console.log("[QueuePanel] dataTransfer ID:", dtId);
-
-    const id = bridgeId || dtId;
-    if (!id) {
-      console.log("[QueuePanel] No track ID found — aborting");
-      return;
-    }
+    // Try mouse-event DragBridge first (Tauri/WebView2 primary path),
+    // then HTML5 DragBridge fallback, then dataTransfer as last resort.
+    const id =
+      DragBridge.endMouseDrag() ||
+      DragBridge.takeDraggedTrackId() ||
+      e.dataTransfer.getData("text/plain") ||
+      e.dataTransfer.getData("Text");
+    if (!id) return;
 
     const allTracks = libraryTracks ?? lib.getAllTracks();
     const track = allTracks.find((t) => t.id === id);
-    console.log("[QueuePanel] Found track:", track?.title ?? "NOT FOUND");
     if (track) {
       engine.enqueue(track);
       refresh();
-      console.log("[QueuePanel] Track enqueued:", track.title);
+    }
+  };
+
+  // ── Mouse-up drop (catches releases that don't trigger HTML5 drop) ──
+  const handlePanelMouseUp = () => {
+    if (!DragBridge.isDragging) return;
+    const trackId = DragBridge.endMouseDrag();
+    if (!trackId) return;
+
+    const allTracks = libraryTracks ?? lib.getAllTracks();
+    const track = allTracks.find((t) => t.id === trackId);
+    if (track) {
+      engine.enqueue(track);
+      refresh();
     }
   };
 
@@ -122,20 +132,19 @@ const QueuePanel: React.FC<QueuePanelProps> = ({ libraryTracks, queueVersion }) 
       onDragEnter={(e) => {
         e.preventDefault();
         dragEnterCounter.current += 1;
-        console.log("[QueuePanel] dragEnter, counter:", dragEnterCounter.current);
         if (dragEnterCounter.current === 1) setDragOver(true);
       }}
       onDragOver={(e) => { e.preventDefault(); e.dataTransfer.dropEffect = "copy"; }}
       onDragLeave={(e) => {
         e.preventDefault();
         dragEnterCounter.current -= 1;
-        console.log("[QueuePanel] dragLeave, counter:", dragEnterCounter.current);
         if (dragEnterCounter.current <= 0) {
           dragEnterCounter.current = 0;
           setDragOver(false);
         }
       }}
       onDrop={handleExternalDrop}
+      onMouseUp={handlePanelMouseUp}
     >
       <div className="queue-panel-header">
         <span>Queue ({queue.length})</span>

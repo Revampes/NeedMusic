@@ -7,7 +7,7 @@
  * for environments where they work (e.g. regular browsers in the web build).
  */
 
-const DRAG_THRESHOLD = 4; // px of movement before we consider it a drag (vs click)
+const DRAG_THRESHOLD = 6; // px of movement before we consider it a drag (vs click)
 
 let _trackId: string | null = null;
 let _startX = 0;

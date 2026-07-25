@@ -237,33 +237,25 @@ const App: React.FC = () => {
         // Only act when a real drag (threshold passed) is in progress.
         if (!DragBridge.isDragging) return;
 
-        // Defer to next tick so any delayed mousemove has a chance to settle.
-        const cx = e.clientX, cy = e.clientY;
-        setTimeout(() => {
-          try {
-            const trackId = DragBridge.endMouseDrag();
-            console.log("[App] mouseup — trackId:", trackId, "clientX:", cx, "clientY:", cy);
-            if (!trackId) return;
+        try {
+          const trackId = DragBridge.endMouseDrag();
+          if (!trackId) return;
 
-            const el = document.elementFromPoint(cx, cy);
-            const queuePanel = el?.closest(".queue-panel") as HTMLElement | null;
-            console.log("[App] elementFromPoint:", el?.tagName, el?.className, "inQueue:", !!queuePanel);
+          const el = document.elementFromPoint(e.clientX, e.clientY);
+          const queuePanel = el?.closest(".queue-panel") as HTMLElement | null;
 
-            if (queuePanel) {
-              const allTracks = LibraryManager.getInstance().getAllTracks();
-              const track = allTracks.find((t) => t.id === trackId);
-              console.log("[App] track lookup:", track?.title ?? "NOT FOUND");
-              if (track) {
-                engine.enqueue(track);
-                setQueueVersion(v => v + 1);
-                console.log("[App] Enqueued via mouse drag:", track.title, "— queue now:", engine.queueTracks.length);
-              }
+          if (queuePanel) {
+            const allTracks = LibraryManager.getInstance().getAllTracks();
+            const track = allTracks.find((t) => t.id === trackId);
+            if (track) {
+              engine.enqueue(track);
+              setQueueVersion(v => v + 1);
             }
-          } catch (err) {
-            console.error("[App] mouseup drag handler error:", err);
-            DragBridge.clear();
           }
-        }, 0);
+        } catch (err) {
+          console.error("[App] mouseup drag handler error:", err);
+          DragBridge.clear();
+        }
       };
       document.addEventListener("mousemove", handleMouseMove);
       document.addEventListener("mouseup", handleMouseUp);
@@ -617,15 +609,12 @@ const TrackListView: React.FC<{ tracks: Track[]; currentTrack: ITrack | null; on
           className={`track-row ${currentTrack?.id === t.id ? "active" : ""}`}
           draggable
           onDragStart={(e) => {
-            console.log("[TrackRow] dragStart — track:", t.title, "id:", t.id);
-            // WebView2 workaround: set both "text/plain" and "Text" formats
             e.dataTransfer.setData("text/plain", t.id);
             e.dataTransfer.setData("Text", t.id);
-            // More permissive effectAllowed for WebView2 compatibility
             e.dataTransfer.effectAllowed = "copyMove";
             DragBridge.setDraggedTrackId(t.id);
           }}
-          onDragEnd={() => { console.log("[TrackRow] dragEnd"); DragBridge.clear(); }}
+          onDragEnd={() => DragBridge.clear()}
           onMouseDown={(e) => {
             // Primary drag mechanism for Tauri/WebView2 (mouse-event-based)
             // Only start on left mouse button and not on interactive children
