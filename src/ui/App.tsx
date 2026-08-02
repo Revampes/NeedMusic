@@ -230,17 +230,17 @@ const App: React.FC = () => {
 
       // ── Mouse-event-based drag bridge (bypasses broken HTML5 DnD in Tauri/WebView2) ──
       const handleMouseMove = (e: MouseEvent) => {
-        DragBridge.onMouseMove(e.clientX, e.clientY);
+        DragBridge.onMouseMove(e.clientX, e.clientY, e.buttons);
       };
       const handleMouseUp = (e: MouseEvent) => {
-        // WebView2 may fire spurious mouseup events from the cancelled HTML5 drag.
-        // Only act when a real drag (threshold passed) is in progress.
-        if (!DragBridge.isDragging) return;
+        // Always end (and reset) the drag on mouseup — even for a plain click.
+        // Previously this returned early when not dragging, leaking stale drag
+        // state that made the queue highlight after double-clicks and forced a
+        // "click once to add" after dragging to the queue.
+        const trackId = DragBridge.endMouseDrag();
+        if (!trackId) return;
 
         try {
-          const trackId = DragBridge.endMouseDrag();
-          if (!trackId) return;
-
           const el = document.elementFromPoint(e.clientX, e.clientY);
           const queuePanel = el?.closest(".queue-panel") as HTMLElement | null;
 
@@ -607,17 +607,12 @@ const TrackListView: React.FC<{ tracks: Track[]; currentTrack: ITrack | null; on
         <div
           key={t.id}
           className={`track-row ${currentTrack?.id === t.id ? "active" : ""}`}
-          draggable
-          onDragStart={(e) => {
-            e.dataTransfer.setData("text/plain", t.id);
-            e.dataTransfer.setData("Text", t.id);
-            e.dataTransfer.effectAllowed = "copyMove";
-            DragBridge.setDraggedTrackId(t.id);
-          }}
-          onDragEnd={() => DragBridge.clear()}
           onMouseDown={(e) => {
-            // Primary drag mechanism for Tauri/WebView2 (mouse-event-based)
-            // Only start on left mouse button and not on interactive children
+            // Primary drag mechanism for Tauri/WebView2 (mouse-event-based).
+            // Note: no native `draggable`/HTML5 DnD here — WebView2's native
+            // drag swallows the mouseup so the queue drop would never register
+            // on release (it required an extra click). The mouse-event path in
+            // DragBridge handles track → queue drags reliably.
             if (e.button !== 0) return;
             const target = e.target as HTMLElement;
             if (target.closest("button, input, .fav-btn, .col-remove, .col-add")) return;

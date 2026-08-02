@@ -7,7 +7,7 @@
  * for environments where they work (e.g. regular browsers in the web build).
  */
 
-const DRAG_THRESHOLD = 6; // px of movement before we consider it a drag (vs click)
+const DRAG_THRESHOLD = 8; // px of movement before we consider it a drag (vs click/double-click)
 
 let _trackId: string | null = null;
 let _startX = 0;
@@ -46,6 +46,7 @@ export const DragBridge = {
 
   /** Call on mousedown of a draggable track row. */
   startMouseDrag(trackId: string, clientX: number, clientY: number): void {
+    reset(); // clear any stale state from a previous interaction first
     _trackId = trackId;
     _startX = clientX;
     _startY = clientY;
@@ -53,8 +54,17 @@ export const DragBridge = {
     _mouseDragActive = true; // lock out HTML5 DnD from interfering
   },
 
-  /** Call on mousemove (delegated globally while a drag may be in progress). */
-  onMouseMove(clientX: number, clientY: number): void {
+  /**
+   * Call on mousemove (delegated globally while a drag may be in progress).
+   * Requires the mouse button to actually be held — if it isn't, we clear any
+   * stale armed state so simple hover motion (e.g. moving between the two
+   * clicks of a double-click) never triggers a false drag / queue highlight.
+   */
+  onMouseMove(clientX: number, clientY: number, buttons = 0): void {
+    if (buttons === 0) {
+      reset();
+      return;
+    }
     if (_trackId === null || _dragging || !_mouseDragActive) return;
     const dx = clientX - _startX;
     const dy = clientY - _startY;
