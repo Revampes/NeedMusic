@@ -26,6 +26,10 @@ export interface OnlineSearchResult {
 export interface CombinedSearchResult {
   bilibili: OnlineSearchResult;
   youtube: OnlineSearchResult;
+  /** Non-fatal error from the Bilibili search (kept tolerant — see search_combined). */
+  bilibili_error?: string | null;
+  /** Non-fatal error from the YouTube search. */
+  youtube_error?: string | null;
 }
 
 /**
@@ -99,6 +103,56 @@ export class OnlineMusicService {
     lib.addTrack(track);
 
     return track;
+  }
+
+  /**
+   * Save the track INTO the library WITHOUT downloading any audio file.
+   *
+   * The stored track carries a virtual identifier as its file path
+   * (`bilibili://{bvid}` / `youtube://{url}`). When it is played, the
+   * NativeAudioPlayer detects the virtual path and resolves the stream
+   * through the source's API into the temp cache — the music library
+   * folder is never touched.
+   */
+  async saveToLibraryVirtual(item: OnlineSearchItem): Promise<Track> {
+    const virtualPath =
+      item.source === "youtube"
+        ? Track.ONLINE_YOUTUBE_PREFIX + (item.url || item.id)
+        : Track.ONLINE_BILIBILI_PREFIX + (item.bvid || item.id);
+
+    const track = new Track({
+      filePath: virtualPath,
+      title: item.title,
+      artist: item.author,
+      album: item.source === "youtube" ? "YouTube" : "Bilibili",
+      albumArtist: item.author,
+      durationSecs: item.duration_secs,
+      genre: "Online",
+      hasArtwork: false,
+    });
+
+    const lib = LibraryManager.getInstance();
+    // addTrack skips duplicates (same virtual id → same track id).
+    await lib.addTrack(track);
+    return track;
+  }
+
+  /**
+   * Merge two platform-ranked result lists into one mixed list. Each
+   * platform's internal ordering (best match first) is preserved; the merge
+   * round-robins between them so neither source dominates the top of the list.
+   */
+  mergeResults(
+    bilibili: OnlineSearchItem[],
+    youtube: OnlineSearchItem[],
+  ): OnlineSearchItem[] {
+    const merged: OnlineSearchItem[] = [];
+    const maxLen = Math.max(bilibili.length, youtube.length);
+    for (let i = 0; i < maxLen; i++) {
+      if (i < bilibili.length) merged.push(bilibili[i]);
+      if (i < youtube.length) merged.push(youtube[i]);
+    }
+    return merged;
   }
 
   /** Check if yt-dlp is available on the system. */

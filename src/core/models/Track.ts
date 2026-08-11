@@ -38,6 +38,7 @@ export class Track implements ITrack {
     year?: number | null;
     codec?: AudioCodec;
     hasArtwork?: boolean;
+    isFavorite?: boolean;
   }) {
     this.id = Track.generateId(params.filePath);
     this.filePath = params.filePath;
@@ -53,7 +54,7 @@ export class Track implements ITrack {
     this.codec = params.codec ?? Track.detectCodec(params.filePath);
     this.hasArtwork = params.hasArtwork ?? false;
     this.dateAdded = new Date();
-    this.isFavorite = false;
+    this.isFavorite = params.isFavorite ?? false;
   }
 
   // ─── Factory Methods ───────────────────────────────────────
@@ -73,6 +74,7 @@ export class Track implements ITrack {
     genre: string;
     year: number | null;
     has_artwork: boolean;
+    is_favorite?: number | boolean | string;
   }): Track {
     return new Track({
       filePath: raw.file_path,
@@ -86,6 +88,8 @@ export class Track implements ITrack {
       genre: raw.genre,
       year: raw.year,
       hasArtwork: raw.has_artwork,
+      // Normalize SQLite INTEGER (0/1) or boolean representation.
+      isFavorite: raw.is_favorite === 1 || raw.is_favorite === "1" || raw.is_favorite === true,
     });
   }
 
@@ -138,6 +142,26 @@ export class Track implements ITrack {
       return `${this.artist} (${this.albumArtist})`;
     }
     return this.artist;
+  }
+
+  /**
+   * Virtual path prefix used for online tracks saved WITHOUT downloading.
+   * Playing such a track resolves the stream via the source's API and uses
+   * the temp cache — the file is never written into the music library.
+   */
+  static readonly ONLINE_BILIBILI_PREFIX = "bilibili://";
+  static readonly ONLINE_YOUTUBE_PREFIX = "youtube://";
+
+  /** Returns "bilibili" | "youtube" | null for online (not downloaded) tracks. */
+  get onlineSource(): "bilibili" | "youtube" | null {
+    if (this.filePath.startsWith(Track.ONLINE_BILIBILI_PREFIX)) return "bilibili";
+    if (this.filePath.startsWith(Track.ONLINE_YOUTUBE_PREFIX)) return "youtube";
+    return null;
+  }
+
+  /** True when this track was saved to the library without downloading audio. */
+  isOnlineTrack(): boolean {
+    return this.onlineSource !== null;
   }
 
   /**

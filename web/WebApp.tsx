@@ -20,6 +20,31 @@ import "../src/ui/styles/global.css";
 const SPEED_OPTIONS = [0.5, 0.75, 1.0, 1.25, 1.5, 2.0];
 const FILTERS = ["All", "Title", "Artist", "Album", "Genre"];
 
+/**
+ * Build a LAN server URL that keeps the `?token=` from the shared address
+ * the user pasted (e.g. http://192.168.1.10:17963/?token=abc) while pointing
+ * at a concrete endpoint.
+ */
+function lanApi(lanUrl: string, pathAndQuery: string): string {
+  try {
+    const u = new URL(lanUrl);
+    const token = u.searchParams.get("token") || "";
+    const [path, query] = pathAndQuery.split("?");
+    u.pathname = path;
+    u.search = "";
+    if (token) u.searchParams.set("token", token);
+    if (query) {
+      for (const pair of query.split("&")) {
+        const [k, v] = pair.split("=");
+        if (k) u.searchParams.set(k, decodeURIComponent(v || ""));
+      }
+    }
+    return u.toString();
+  } catch {
+    return `${lanUrl.replace(/\/+$/, "")}${pathAndQuery}`;
+  }
+}
+
 const WebApp: React.FC = () => {
   const bgCanvasRef = useRef<HTMLCanvasElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
@@ -35,6 +60,11 @@ const WebApp: React.FC = () => {
     repeatMode: RepeatMode.Off, isShuffled: false, isFavorite: false, buffering: false,
   });
   const engine = useMemo(() => PlaybackEngine.getInstance(), []);
+
+  // ── LAN Sync (experimental): connect to the desktop server on the same Wi-Fi ──
+  const [lanUrl, setLanUrl] = useState(() => {
+    try { return localStorage.getItem("needmusic:lanUrl") || ""; } catch { return ""; }
+  });
 
   // ── Initialize ────────────────────────────────────
   useEffect(() => {
@@ -230,6 +260,9 @@ const WebApp: React.FC = () => {
         <nav className="icon-sidebar">
           <div className={`icon-nav-item ${activeTab === "Tracks" ? "active" : ""}`} onClick={() => setActiveTab("Tracks")} title="Tracks"><IconLibrary size={18} /></div>
           <div className={`icon-nav-item ${activeTab === "Playlists" ? "active" : ""}`} onClick={() => setActiveTab("Playlists")} title="Playlists"><IconPlaylist size={18} /></div>
+          {lanUrl && (
+            <div className={`icon-nav-item ${activeTab === "Online" ? "active" : ""}`} onClick={() => setActiveTab("Online")} title="Online Search (via desktop)"><IconGlobe size={18} /></div>
+          )}
           <div className="icon-nav-spacer" />
           <div className={`icon-nav-item ${activeTab === "Settings" ? "active" : ""}`} onClick={() => setActiveTab("Settings")} title="Settings"><IconSettings size={18} /></div>
           {/* Import button */}
@@ -256,10 +289,23 @@ const WebApp: React.FC = () => {
             </div>
           )}
           <div className="content-area">
-            {activeTab === "Playlists" ? (
+            {activeTab === "Online" && lanUrl ? (
+              <WebOnlineSearch lanUrl={lanUrl} onPlay={handlePlayTrack} />
+            ) : activeTab === "Playlists" ? (
               <WebPlaylistsView tracks={tracks} onPlay={handlePlayTrack} />
             ) : activeTab === "Settings" ? (
-              <WebSettingsView />
+              <WebSettingsView
+                lanUrl={lanUrl}
+                onConnect={(url) => {
+                  setLanUrl(url);
+                  try { localStorage.setItem("needmusic:lanUrl", url); } catch { /* ignore */ }
+                  setTracks(webTrackStore.getAll());
+                }}
+                onDisconnect={() => {
+                  setLanUrl("");
+                  try { localStorage.removeItem("needmusic:lanUrl"); } catch { /* ignore */ }
+                }}
+              />
             ) : (
               <TrackListView
                 tracks={filteredTracks}
@@ -389,8 +435,16 @@ const TrackListView: React.FC<{
   </div>
 );
 
-const WebSettingsView: React.FC = () => {
+const WebSettingsView: React.FC<{
+  lanUrl: string;
+  onConnect: (url: string) => void;
+  onDisconnect: () => void;
+}> = ({ lanUrl, onConnect, onDisconnect }) => {
   const [theme, setTheme] = useState(localStorage.getItem("needmusic:theme") || "dark");
+  const [serverUrl, setServerUrl] = useState(lanUrl);
+  const [lanStatus, setLanStatus] = useState<string | null>(null);
+  const [lanBusy, setLanBusy] = useState(false);
+
   const applyTheme = (t: string) => {
     setTheme(t);
     localStorage.setItem("needmusic:theme", t);
@@ -398,6 +452,48 @@ const WebSettingsView: React.FC = () => {
     h.classList.remove("theme-dark", "theme-light");
     h.classList.add(`theme-${t}`);
   };
+
+  // Fetch the desktop library over the LAN and add its tracks locally.
+  const connect = async () => {
+    const url = serverUrl.trim().replace(/\/+$/, "");
+    if (!url) return;
+    setLanBusy(true);
+    setLanStatus(null);
+    try {
+      const res = await fetch(lanApi(lanUrl, "/api/library"));
+      if (!res.ok) throw new Error(`HTTP ${res.status} — is the desktop server running?`);
+      const data = await res.json();
+      const remoteTracks: TrackData[] = (data.tracks ?? []).map((t: any) => ({
+        id: t.id,
+        title: t.title,
+        artist: t.artist,
+        album: t.album,
+        albumArtist: t.artist,
+        durationSecs: t.duration_secs || 0,
+        trackNumber: null,
+        discNumber: null,
+        genre: "",
+        year: null,
+        codec: "mp3",
+        hasArtwork: false,
+        dateAdded: new Date(),
+        isFavorite: false,
+        audioUrl: lanApi(url, `/audio/${encodeURIComponent(t.id)}`),
+        sourceName: `${t.title} (LAN)`,
+      }));
+      webTrackStore.addTracks(remoteTracks);
+      try {
+        localStorage.setItem("needmusic:tracks", JSON.stringify(webTrackStore.getAll()));
+      } catch { /* quota */ }
+      onConnect(url);
+      setLanStatus(`Connected — ${remoteTracks.length} tracks synced from your computer.`);
+    } catch (e) {
+      setLanStatus(String(e));
+    } finally {
+      setLanBusy(false);
+    }
+  };
+
   return (
     <div className="track-list" style={{ padding: 24 }}>
       <h3 style={{ marginBottom: 16 }}>Settings</h3>
@@ -408,6 +504,46 @@ const WebSettingsView: React.FC = () => {
           <option value="light">Light</option>
         </select>
       </div>
+
+      {/* ── LAN Sync (experimental) ── */}
+      <div style={{ marginBottom: 16, padding: 12, border: "1px solid #333", borderRadius: 8, background: "#14141f" }}>
+        <h4 style={{ marginBottom: 8, fontSize: 14 }}>Sync with Computer <span style={{ color: "#888", fontSize: 11, fontWeight: 400 }}>(experimental)</span></h4>
+        <p style={{ fontSize: 11, color: "#999", marginBottom: 8, lineHeight: 1.5 }}>
+          On your computer open Settings → LAN Sync → Start Server, then paste the full address it shows
+          (it contains a security token, e.g. <code style={{ color: "#ccc" }}>http://192.168.1.10:17963/?token=…</code>).
+          Your phone and computer must be on the same Wi-Fi.
+        </p>
+        <div style={{ display: "flex", gap: 6, marginBottom: 8 }}>
+          <input
+            value={serverUrl}
+            onChange={(e) => setServerUrl(e.target.value)}
+            placeholder="http://192.168.1.10:17963"
+            inputMode="url"
+            style={{ flex: 1, padding: "6px 8px", background: "#1a1a1a", border: "1px solid #333", color: "#e0e0e0", borderRadius: 4, fontSize: 13 }}
+          />
+          <button
+            onClick={connect}
+            disabled={lanBusy || !serverUrl.trim()}
+            style={{ padding: "6px 14px", background: lanUrl ? "#333" : "#e94560", color: "#fff", border: "none", borderRadius: 4, cursor: "pointer", fontSize: 13 }}
+          >
+            {lanBusy ? "…" : lanUrl ? "Reconnect" : "Connect"}
+          </button>
+          {lanUrl && (
+            <button
+              onClick={() => {
+                onDisconnect();
+                setServerUrl("");
+                setLanStatus("Disconnected. Synced tracks stay on this device.");
+              }}
+              style={{ padding: "6px 10px", background: "transparent", color: "#e94560", border: "1px solid #e94560", borderRadius: 4, cursor: "pointer", fontSize: 13 }}
+            >
+              Disconnect
+            </button>
+          )}
+        </div>
+        {lanStatus && <p style={{ fontSize: 11, color: lanStatus.startsWith("Connected") ? "#4ecdc4" : "#e94560" }}>{lanStatus}</p>}
+      </div>
+
       <button
         onClick={() => {
           webTrackStore.clear();
@@ -418,6 +554,123 @@ const WebSettingsView: React.FC = () => {
       >
         Clear All Tracks
       </button>
+    </div>
+  );
+};
+
+// ─── Online search proxied through the desktop's LAN server ──
+
+const WebOnlineSearch: React.FC<{ lanUrl: string; onPlay: (t: TrackData) => void }> = ({ lanUrl, onPlay }) => {
+  const [q, setQ] = useState("");
+  const [results, setResults] = useState<any[]>([]);
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  const search = async () => {
+    const query = q.trim();
+    if (!query) return;
+    setLoading(true);
+    setError(null);
+    setResults([]);
+    try {
+      const res = await fetch(lanApi(lanUrl, `/online/search?q=${encodeURIComponent(query)}`));
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      const data = await res.json();
+      // Merge Bilibili + YouTube round-robin (same as the desktop).
+      const bili: any[] = data.bilibili?.results ?? [];
+      const yt: any[] = data.youtube?.results ?? [];
+      const merged: any[] = [];
+      const max = Math.max(bili.length, yt.length);
+      for (let i = 0; i < max; i++) {
+        if (i < bili.length) merged.push(bili[i]);
+        if (i < yt.length) merged.push(yt[i]);
+      }
+      setResults(merged);
+      if (merged.length === 0) setError("No results found. Try a different search term.");
+    } catch (e) {
+      setError(String(e));
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const play = (item: any) => {
+    // The desktop server downloads to its temp cache and streams the file.
+    const idOrUrl = item.source === "youtube" ? item.url : item.bvid;
+    const audioUrl = lanApi(
+      lanUrl,
+      `/online/audio?source=${encodeURIComponent(item.source)}` +
+        `&id=${encodeURIComponent(idOrUrl)}` +
+        `&title=${encodeURIComponent(item.title)}` +
+        `&artist=${encodeURIComponent(item.author)}`
+    );
+    onPlay({
+      id: `web-online-${item.source}-${item.id}`,
+      title: item.title,
+      artist: item.author,
+      album: item.source === "youtube" ? "YouTube" : "Bilibili",
+      albumArtist: item.author,
+      durationSecs: item.duration_secs || 0,
+      trackNumber: null,
+      discNumber: null,
+      genre: "Online",
+      year: null,
+      codec: "mp4",
+      hasArtwork: false,
+      dateAdded: new Date(),
+      isFavorite: false,
+      audioUrl,
+      sourceName: item.title,
+    });
+  };
+
+  return (
+    <div className="online-search-view">
+      <div className="online-search-bar">
+        <input
+          className="online-search-input"
+          type="text"
+          placeholder="Search Bilibili & YouTube (via your computer)..."
+          value={q}
+          onChange={(e) => setQ(e.target.value)}
+          onKeyDown={(e) => { if (e.key === "Enter") search(); }}
+          disabled={loading}
+        />
+        <button className="online-search-btn" onClick={search} disabled={loading || !q.trim()}>
+          {loading ? "Searching..." : "Search"}
+        </button>
+      </div>
+      {error && (
+        <div className="online-error">
+          <IconClose size={14} />
+          <span>{error}</span>
+        </div>
+      )}
+      <div className="online-results-list" style={{ paddingTop: 8 }}>
+        {results.map((item) => (
+          <div key={`${item.source}-${item.id}`} className="online-result-row">
+            <div className="online-result-row-info">
+              <div className="online-result-row-title">{item.title}</div>
+              <div className="online-result-row-meta">
+                <span className="online-result-row-author">{item.author}</span>
+                <span className="online-result-row-duration">{item.duration}</span>
+              </div>
+            </div>
+            <div className="online-result-row-actions">
+              <button className="online-action-btn play" onClick={() => play(item)}>
+                <IconPlay size={12} />
+                Play
+              </button>
+            </div>
+          </div>
+        ))}
+      </div>
+      {!loading && results.length === 0 && !error && (
+        <div className="online-empty">
+          <IconGlobe size={32} />
+          <p>Search music from Bilibili & YouTube — playback streams through your computer.</p>
+        </div>
+      )}
     </div>
   );
 };

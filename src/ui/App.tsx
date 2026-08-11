@@ -19,12 +19,15 @@ import SettingsView from "@ui/components/SettingsView";
 import OnlineSearchView from "@ui/components/OnlineSearchView";
 import CustomTitleBar from "@ui/components/CustomTitleBar";
 import QueuePanel from "@ui/components/QueuePanel";
+import LyricsPanel from "@ui/components/LyricsPanel";
 import MarqueeText from "@ui/components/MarqueeText";
+import { LyricsService, LyricLine, findCurrentLine } from "@core/services/LyricsService";
 import {
   IconLibrary, IconHeart, IconHeartFill, IconPlaylist, IconSettings,
   IconMusic, IconImage, IconPrevious, IconPlay, IconPause, IconNext, IconStop,
   IconRepeatOff, IconRepeat, IconRepeatOne, IconShuffle, IconVolume,
   IconClock, IconPlus, IconDisc, IconMic, IconGlobe, IconClose, IconHome,
+  IconLyrics,
 } from "@ui/components/Icons";
 import SplashScreen from "@ui/components/SplashScreen";
 import HomeView from "@ui/components/HomeView";
@@ -46,6 +49,10 @@ const App: React.FC = () => {
   const [searchQuery, setSearchQuery] = useState("");
   const [filterField, setFilterField] = useState("All");
   const [queueVersion, setQueueVersion] = useState(0); // bumped on every queue mutation
+  // Lyrics: fetched for the current track when it is a Bilibili online track.
+  const [showLyrics, setShowLyrics] = useState(false);
+  const [lyricsLines, setLyricsLines] = useState<LyricLine[] | null>(null);
+  const [lyricsLoading, setLyricsLoading] = useState(false);
   const [player, setPlayer] = useState<PlayerState>({
     currentTrack: null, playbackState: PlaybackState.Idle,
     currentTimeSecs: 0, durationSecs: 0, volume: 1, playbackRate: 1,
@@ -175,6 +182,12 @@ const App: React.FC = () => {
           }
           const currentTrack = engine.currentTrack;
           const curTime = engine.getCurrentTime();
+          // Current lyric line (main window decides the line; the island
+          // window renders it only when its own setting is enabled).
+          const lyricLines = lyricsLinesRef.current;
+          const lyric = lyricLines && lyricLines.length > 0
+            ? (lyricLines[findCurrentLine(lyricLines, curTime)]?.text ?? null)
+            : null;
           await emit("island-state", {
             currentTrack: currentTrack ? {
               title: currentTrack.title,
@@ -185,6 +198,7 @@ const App: React.FC = () => {
             currentTimeSecs: curTime,
             durationSecs: currentTrack?.durationSecs ?? 0,
             nextTrack,
+            lyric,
           });
         } catch { /* island window may not exist yet */ }
       };
@@ -372,6 +386,44 @@ const App: React.FC = () => {
     return () => { clearTimeout(timeoutId); if (islandInterval) clearInterval(islandInterval); keydownCleanupRef.current?.(); hotkeyUnlistenRef.current?.(); dragCleanupRef.current?.(); BackgroundEngine.getInstance().unmount(); };
   }, [engine]);
 
+  // ── Lyrics: fetch when the current track changes ──
+  const lyricsLinesRef = useRef<LyricLine[] | null>(null);
+  useEffect(() => {
+    const track = player.currentTrack as Track | null;
+    setLyricsLines(null);
+    setLyricsLoading(false);
+    lyricsLinesRef.current = null;
+    if (!track || track.onlineSource !== "bilibili") {
+      return;
+    }
+    const bvid = track.filePath.slice(Track.ONLINE_BILIBILI_PREFIX.length);
+    setLyricsLoading(true);
+    LyricsService.getLyrics(track.id, bvid)
+      .then((lines) => {
+        lyricsLinesRef.current = lines;
+        setLyricsLines(lines);
+      })
+      .catch(() => {
+        lyricsLinesRef.current = null;
+        setLyricsLines(null);
+      })
+      .finally(() => setLyricsLoading(false));
+  }, [player.currentTrack?.id]);
+
+  // ── LAN Sync (experimental): keep the LAN server's library in sync ──
+  useEffect(() => {
+    invoke("lan_set_library", {
+      tracks: tracks.map((t) => ({
+        id: t.id,
+        title: t.title,
+        artist: t.artist,
+        album: t.album,
+        filePath: t.filePath,
+        durationSecs: t.durationSecs,
+      })),
+    }).catch(() => { /* server may not be running — non-fatal */ });
+  }, [tracks]);
+
   const filteredTracks = useMemo(() => {
     let list = tracks;
     if (!searchQuery.trim()) return list;
@@ -391,11 +443,12 @@ const App: React.FC = () => {
     await engine.play(track);
   }, [engine]);
 
-  const handleToggleFavorite = useCallback(async (track: Track) => {
-    track.isFavorite = !track.isFavorite;
-    await DatabaseManager.getInstance().setFavorite(track.id, track.isFavorite);
+  const handleToggleFavorite = useCallback(async (track: Track, force?: boolean) => {
+    const next = force ?? !track.isFavorite;
+    track.isFavorite = next;
+    await DatabaseManager.getInstance().setFavorite(track.id, next);
     setTracks([...tracks]);
-    if (player.currentTrack?.id === track.id) setPlayer((p) => ({ ...p, isFavorite: track.isFavorite }));
+    if (player.currentTrack?.id === track.id) setPlayer((p) => ({ ...p, isFavorite: next }));
   }, [tracks, player.currentTrack]);
 
   const handleRemoveTrack = useCallback(async (track: Track) => {
@@ -409,13 +462,16 @@ const App: React.FC = () => {
 
   const handleTitleChange = useCallback(async (track: Track, newTitle: string) => {
     const db = DatabaseManager.getInstance();
-    // Persist to the audio file's metadata tags.
-    invoke("write_track_metadata", {
-      filePath: track.filePath,
-      title: newTitle,
-      artist: null,
-      album: null,
-    }).catch((err) => console.warn("[NeedMusic] Failed to write metadata to file:", err));
+    // Persist to the audio file's metadata tags (skipped for online tracks,
+    // which have no local audio file).
+    if (!track.isOnlineTrack()) {
+      invoke("write_track_metadata", {
+        filePath: track.filePath,
+        title: newTitle,
+        artist: null,
+        album: null,
+      }).catch((err) => console.warn("[NeedMusic] Failed to write metadata to file:", err));
+    }
     // Update the database.
     await db.updateTrackMetadata(track.id, { title: newTitle });
     // Update local state so the UI re-renders.
@@ -496,7 +552,15 @@ const App: React.FC = () => {
              <TrackListView tracks={filteredTracks} currentTrack={ct} onPlay={handlePlayTrack} onToggleFav={handleToggleFavorite} onRemove={handleRemoveTrack} onTitleChange={handleTitleChange} />}
           </div>
         </div>
-        <QueuePanel libraryTracks={tracks} queueVersion={queueVersion} />
+          {showLyrics ? (
+            <LyricsPanel
+              track={ct as Track | null}
+              currentTimeSecs={player.currentTimeSecs}
+              onClose={() => setShowLyrics(false)}
+            />
+          ) : (
+            <QueuePanel libraryTracks={tracks} queueVersion={queueVersion} onAddFavorite={(t) => handleToggleFavorite(t as Track, true)} />
+          )}
       </div>
       <div className="player-bar frosted-panel">
         <div className="player-left">
@@ -525,6 +589,16 @@ const App: React.FC = () => {
           <ProgressBar currentSecs={player.currentTimeSecs} totalSecs={player.durationSecs} onSeek={(s) => engine.seek(s)} />
         </div>
         <div className="player-right">
+          {/* Lyrics toggle (only for Bilibili tracks, which may carry lyrics) */}
+          {ct && (ct as Track).onlineSource === "bilibili" && (
+            <button
+              className={`ctrl-btn ${showLyrics ? "active" : ""}`}
+              onClick={() => setShowLyrics((v) => !v)}
+              title={showLyrics ? "Close lyrics" : lyricsLoading ? "Loading lyrics…" : lyricsLines && lyricsLines.length > 0 ? "Show lyrics" : "No lyrics available"}
+            >
+              <IconLyrics size={15} />
+            </button>
+          )}
           {/* Playback Speed */}
           <select
             className="speed-select"
@@ -557,6 +631,7 @@ const App: React.FC = () => {
               onChange={(e) => engine.setVolume(Number(e.target.value) / 100)}
               className="volume-range"
               title={`Volume: ${Math.round(player.volume * 100)}%`} />
+            <span className="volume-value">{Math.round(player.volume * 100)}%</span>
           </div>
         </div>
       </div>
@@ -640,12 +715,15 @@ const TrackListView: React.FC<{ tracks: Track[]; currentTrack: ITrack | null; on
                 title="Click to edit title"
                 onClick={(e) => { e.stopPropagation(); startEdit(t); }}
               >
-                <MarqueeText>{t.title}</MarqueeText>
+                <span className="multiline-text">{t.title}</span>
+                {t.isOnlineTrack() && (
+                  <span className="track-online-badge" title="Saved without downloading — plays via the source API">Online</span>
+                )}
               </span>
             )}
           </span>
-          <span className="col-artist"><MarqueeText>{t.artist}</MarqueeText></span>
-          <span className="col-album"><MarqueeText>{t.album}</MarqueeText></span>
+          <span className="col-artist"><span className="multiline-text">{t.artist}</span></span>
+          <span className="col-album"><span className="multiline-text">{t.album}</span></span>
           <span className="col-dur">{t.formatDuration()}</span>
           <span className="col-add" title="Add to queue" onClick={(e) => { e.stopPropagation(); PlaybackEngine.getInstance().enqueue(t); }}><IconPlus size={14} /></span>
           <span className="col-remove" title="Remove from library" onClick={(e) => { e.stopPropagation(); onRemove(t); }}><IconClose size={12} /></span>

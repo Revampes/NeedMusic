@@ -103,8 +103,8 @@ export class DatabaseManager {
     await this.db!.execute(
       `INSERT OR REPLACE INTO tracks
        (id, file_path, title, artist, album, album_artist,
-        duration_secs, track_number, disc_number, genre, year, codec, has_artwork)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)`,
+        duration_secs, track_number, disc_number, genre, year, codec, has_artwork, is_favorite)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)`,
       [
         track.id,
         track.filePath,
@@ -119,6 +119,7 @@ export class DatabaseManager {
         track.year,
         track.codec,
         track.hasArtwork ? 1 : 0,
+        track.isFavorite ? 1 : 0,
       ]
     );
   }

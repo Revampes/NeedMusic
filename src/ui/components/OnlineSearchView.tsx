@@ -3,7 +3,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { OnlineMusicService, OnlineSearchItem } from "@core/services/OnlineMusicService";
 import { PlaybackEngine } from "@core/services/PlaybackEngine";
 import { DatabaseManager } from "@core/services/DatabaseManager";
-import { IconMusic, IconPlay, IconClose, IconPlus } from "@ui/components/Icons";
+import { IconMusic, IconPlay, IconClose, IconPlus, IconDownload } from "@ui/components/Icons";
 
 /** Fetches a cover image through the Rust proxy (adds Referer header). */
 const ProxiedCover: React.FC<{ url: string; alt: string }> = ({ url, alt }) => {
@@ -41,11 +41,12 @@ interface OnlineSearchViewProps {
 
 const OnlineSearchView: React.FC<OnlineSearchViewProps> = ({ onTrackSaved }) => {
   const [query, setQuery] = useState("");
-  const [bilibiliResults, setBilibiliResults] = useState<OnlineSearchItem[]>([]);
-  const [youtubeResults, setYoutubeResults] = useState<OnlineSearchItem[]>([]);
+  // Merged results from Bilibili + YouTube (no platform separation).
+  const [results, setResults] = useState<OnlineSearchItem[]>([]);
   const [loading, setLoading] = useState(false);
   const [downloading, setDownloading] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [warning, setWarning] = useState<string | null>(null);
   const [youtubeEnabled, setYoutubeEnabled] = useState(false);
   const [downloadDir, setDownloadDir] = useState("");
   const [viewMode, setViewMode] = useState<"grid" | "list">("list");
@@ -66,7 +67,7 @@ const OnlineSearchView: React.FC<OnlineSearchViewProps> = ({ onTrackSaved }) => 
         try {
           dir = await invoke<string>("get_default_download_dir");
         } catch {
-          dir = ""; // Will show error on save attempt
+          dir = ""; // Will show error on download attempt
         }
       }
       setDownloadDir(dir || "");
@@ -84,27 +85,51 @@ const OnlineSearchView: React.FC<OnlineSearchViewProps> = ({ onTrackSaved }) => 
     return () => clearTimeout(t);
   }, [error]);
 
+  // Auto-dismiss warning after 12 seconds
+  React.useEffect(() => {
+    if (!warning) return;
+    const t = setTimeout(() => setWarning(null), 12000);
+    return () => clearTimeout(t);
+  }, [warning]);
+
   // Search both sources
   const handleSearch = useCallback(async () => {
     const q = query.trim();
     if (!q) return;
     setLoading(true);
     setError(null);
-    setBilibiliResults([]);
-    setYoutubeResults([]);
+    setWarning(null);
+    setResults([]);
     try {
       if (youtubeEnabled) {
-        // Search both simultaneously
+        // Search both simultaneously (Rust is tolerant of per-source failures).
         const res = await service.searchCombined(q);
-        setBilibiliResults(res.bilibili.results);
-        setYoutubeResults(res.youtube.results);
-        if (res.bilibili.results.length === 0 && res.youtube.results.length === 0) {
-          setError("No results found. Try a different search term.");
+        // Mix both platforms into one list, keeping each platform's best-match order.
+        setResults(service.mergeResults(res.bilibili.results, res.youtube.results));
+
+        const biliOk = res.bilibili.results.length > 0;
+        const ytOk = res.youtube.results.length > 0;
+
+        if (!biliOk && !ytOk) {
+          // Nothing to show — surface the real reason.
+          if (res.bilibili_error && res.youtube_error) {
+            setError(`Search failed for both sources: ${res.bilibili_error} | ${res.youtube_error}`);
+          } else if (res.bilibili_error) {
+            setError(`Bilibili search failed: ${res.bilibili_error}`);
+          } else if (res.youtube_error) {
+            setError(`YouTube search failed: ${res.youtube_error}`);
+          } else {
+            setError("No results found. Try a different search term.");
+          }
+        } else {
+          // Some results came back — non-fatal per-source issues become warnings.
+          if (res.bilibili_error) setWarning(`Bilibili search had an issue: ${res.bilibili_error}`);
+          else if (res.youtube_error) setWarning(`YouTube search had an issue: ${res.youtube_error}`);
         }
       } else {
         // Bilibili only
         const res = await service.searchBilibili(q);
-        setBilibiliResults(res.results);
+        setResults(res.results);
         if (res.results.length === 0) {
           setError("No results found. Try a different search term.");
         }
@@ -114,7 +139,7 @@ const OnlineSearchView: React.FC<OnlineSearchViewProps> = ({ onTrackSaved }) => 
     } finally {
       setLoading(false);
     }
-  }, [query, youtubeEnabled]);
+  }, [query, youtubeEnabled, service]);
 
   const handleKeyDown = useCallback(
     (e: React.KeyboardEvent) => {
@@ -135,10 +160,24 @@ const OnlineSearchView: React.FC<OnlineSearchViewProps> = ({ onTrackSaved }) => 
     } finally {
       setDownloading(null);
     }
-  }, [engine]);
+  }, [engine, service]);
 
-  // Save to library
+  // Save to library WITHOUT downloading (virtual online track).
   const handleSave = useCallback(async (item: OnlineSearchItem) => {
+    setDownloading(item.id);
+    setError(null);
+    try {
+      await service.saveToLibraryVirtual(item);
+      onTrackSaved();
+    } catch (err) {
+      setError(String(err));
+    } finally {
+      setDownloading(null);
+    }
+  }, [onTrackSaved, service]);
+
+  // Download audio file into the music library (old Save behavior).
+  const handleDownload = useCallback(async (item: OnlineSearchItem) => {
     if (!downloadDir) {
       setError("Download directory not available. Check Settings.");
       return;
@@ -153,19 +192,15 @@ const OnlineSearchView: React.FC<OnlineSearchViewProps> = ({ onTrackSaved }) => 
     } finally {
       setDownloading(null);
     }
-  }, [downloadDir, onTrackSaved]);
+  }, [downloadDir, onTrackSaved, service]);
 
-  const hasResults = bilibiliResults.length > 0 || youtubeResults.length > 0;
+  const hasResults = results.length > 0;
   const searchPlaceholder = youtubeEnabled
     ? "Search Bilibili & YouTube for music..."
     : "Search Bilibili for music...";
 
   const renderResultCard = (item: OnlineSearchItem) => (
     <div key={`${item.source}-${item.id}`} className="online-result-card">
-      {/* Source badge */}
-      <span className={`online-source-badge ${item.source}`}>
-        {item.source === "youtube" ? "YT" : "Bili"}
-      </span>
       {/* Cover image */}
       <div className="online-result-cover">
         <ProxiedCover url={item.cover_url} alt={item.title} />
@@ -176,7 +211,7 @@ const OnlineSearchView: React.FC<OnlineSearchViewProps> = ({ onTrackSaved }) => 
           className="online-result-play-btn"
           onClick={() => handlePlay(item)}
           disabled={downloading === item.id}
-          title="Download & Play"
+          title="Play now (temp download)"
         >
           {downloading === item.id ? (
             <span className="online-spinner" />
@@ -218,11 +253,20 @@ const OnlineSearchView: React.FC<OnlineSearchViewProps> = ({ onTrackSaved }) => 
           <button
             className="online-action-btn save"
             onClick={() => handleSave(item)}
-            disabled={downloading === item.id || !downloadDir}
-            title={downloadDir ? "Save to library" : "Download path not set — check Settings"}
+            disabled={downloading === item.id}
+            title="Save to library without downloading (plays via API)"
           >
             <IconPlus size={12} />
             Save
+          </button>
+          <button
+            className="online-action-btn download"
+            onClick={() => handleDownload(item)}
+            disabled={downloading === item.id || !downloadDir}
+            title={downloadDir ? "Download audio to library" : "Download path not set — check Settings"}
+          >
+            <IconDownload size={12} />
+            Download
           </button>
         </div>
       </div>
@@ -232,10 +276,6 @@ const OnlineSearchView: React.FC<OnlineSearchViewProps> = ({ onTrackSaved }) => 
   // ── List view variant (compact row, no cover image) ──
   const renderResultRow = (item: OnlineSearchItem) => (
     <div key={`${item.source}-${item.id}`} className="online-result-row">
-      {/* Source badge */}
-      <span className={`online-source-badge ${item.source}`}>
-        {item.source === "youtube" ? "YT" : "Bili"}
-      </span>
       {/* Title + author */}
       <div className="online-result-row-info">
         <div className="online-result-row-title" title={item.title}>
@@ -260,11 +300,20 @@ const OnlineSearchView: React.FC<OnlineSearchViewProps> = ({ onTrackSaved }) => 
         <button
           className="online-action-btn save"
           onClick={() => handleSave(item)}
-          disabled={downloading === item.id || !downloadDir}
-          title={downloadDir ? "Save to library" : "Download path not set — check Settings"}
+          disabled={downloading === item.id}
+          title="Save to library without downloading (plays via API)"
         >
           <IconPlus size={12} />
           Save
+        </button>
+        <button
+          className="online-action-btn download"
+          onClick={() => handleDownload(item)}
+          disabled={downloading === item.id || !downloadDir}
+          title={downloadDir ? "Download audio to library" : "Download path not set — check Settings"}
+        >
+          <IconDownload size={12} />
+          Download
         </button>
       </div>
     </div>
@@ -316,39 +365,24 @@ const OnlineSearchView: React.FC<OnlineSearchViewProps> = ({ onTrackSaved }) => 
         </div>
       )}
 
-      {/* ── Bilibili Results ── */}
-      {bilibiliResults.length > 0 && (
-        <div className="online-results-section">
-          <h3 className="online-results-section-title">
-            <span className="online-source-badge bilibili">Bili</span>
-            Bilibili Results
-          </h3>
-          {viewMode === "grid" ? (
-            <div className="online-results-grid">
-              {bilibiliResults.map(renderResultCard)}
-            </div>
-          ) : (
-            <div className="online-results-list">
-              {bilibiliResults.map(renderResultRow)}
-            </div>
-          )}
+      {/* Non-fatal warning (e.g. one source failed but the other worked) */}
+      {warning && (
+        <div className="online-warning">
+          <IconClose size={14} />
+          <span>{warning}</span>
         </div>
       )}
 
-      {/* ── YouTube Results ── */}
-      {youtubeResults.length > 0 && (
+      {/* ── Mixed Results (Bilibili + YouTube) ── */}
+      {results.length > 0 && (
         <div className="online-results-section">
-          <h3 className="online-results-section-title">
-            <span className="online-source-badge youtube">YT</span>
-            YouTube Results
-          </h3>
           {viewMode === "grid" ? (
             <div className="online-results-grid">
-              {youtubeResults.map(renderResultCard)}
+              {results.map(renderResultCard)}
             </div>
           ) : (
             <div className="online-results-list">
-              {youtubeResults.map(renderResultRow)}
+              {results.map(renderResultRow)}
             </div>
           )}
         </div>

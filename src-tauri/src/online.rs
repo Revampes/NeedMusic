@@ -36,10 +36,47 @@ pub struct OnlineSearchResult {
 }
 
 /// Combined search result from both sources.
+/// Searches are independent: if one source fails, the other's results are
+/// still returned and the error is reported in the corresponding `*_error`
+/// field (non-fatal) — a single source failing must not break the whole search.
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct CombinedSearchResult {
     pub bilibili: OnlineSearchResult,
     pub youtube: OnlineSearchResult,
+    pub bilibili_error: Option<String>,
+    pub youtube_error: Option<String>,
+}
+
+/// Search both Bilibili and YouTube in parallel, tolerating per-source
+/// failures so the first search (e.g. cold Wbi keys / yt-dlp auto-install)
+/// never fails the whole request.
+pub fn search_combined(query: &str) -> CombinedSearchResult {
+    let q1 = query.to_string();
+    let q2 = query.to_string();
+
+    let (bili, yt) = std::thread::scope(|scope| {
+        let b = scope.spawn(|| search_bilibili(&q1));
+        let y = scope.spawn(|| search_youtube(&q2));
+        (b.join(), y.join())
+    });
+
+    let (bilibili, bilibili_error) = match bili {
+        Ok(Ok(res)) => (res, None),
+        Ok(Err(e)) => (OnlineSearchResult { results: vec![], total: 0 }, Some(e)),
+        Err(_) => (OnlineSearchResult { results: vec![], total: 0 }, Some("Bilibili search panicked".to_string())),
+    };
+    let (youtube, youtube_error) = match yt {
+        Ok(Ok(res)) => (res, None),
+        Ok(Err(e)) => (OnlineSearchResult { results: vec![], total: 0 }, Some(e)),
+        Err(_) => (OnlineSearchResult { results: vec![], total: 0 }, Some("YouTube search panicked".to_string())),
+    };
+
+    CombinedSearchResult {
+        bilibili,
+        youtube,
+        bilibili_error,
+        youtube_error,
+    }
 }
 
 // ─── Wbi Signing ──────────────────────────────────────
@@ -395,9 +432,16 @@ fn fmt_secs(secs: f64) -> String {
 
 // ─── Audio URL Resolution ─────────────────────────────
 
-/// Get the best audio stream URL for a Bilibili video.
-fn get_audio_url(bvid: &str) -> Result<String, String> {
-    // First get the cid from video info.
+/// Get the cid (clips id) for a Bilibili video, needed by the play URL and
+/// lyrics endpoints.
+fn get_cid(bvid: &str) -> Result<u64, String> {
+    get_cid_inner(bvid, 0)
+}
+
+fn get_cid_inner(bvid: &str, attempt: u8) -> Result<u64, String> {
+    if attempt >= 2 {
+        return Err("Bilibili API keeps rejecting the request (-799)".to_string());
+    }
     let info_url = make_signed_url(
         "https://api.bilibili.com/x/web-interface/view",
         &[("bvid", bvid)],
@@ -409,16 +453,58 @@ fn get_audio_url(bvid: &str) -> Result<String, String> {
     if code == -799 {
         let mut cache = WBI_CACHE.lock().unwrap();
         *cache = None;
-        return get_audio_url(bvid);
+        return get_cid_inner(bvid, attempt + 1);
     }
     if code != 0 {
         let msg = json["message"].as_str().unwrap_or("Unknown error");
         return Err(format!("Video info API error ({}): {}", code, msg));
     }
 
-    let cid = json["data"]["cid"]
+    json["data"]["cid"]
         .as_u64()
-        .ok_or("No cid found for video")?;
+        .ok_or("No cid found for video".to_string())
+}
+
+/// Fetch LRC lyrics for a Bilibili video.
+/// Returns Err when the video has no lyrics (common for music videos / AVs).
+pub fn get_bilibili_lyrics(bvid: &str) -> Result<String, String> {
+    get_bilibili_lyrics_inner(bvid, 0)
+}
+
+fn get_bilibili_lyrics_inner(bvid: &str, attempt: u8) -> Result<String, String> {
+    if attempt >= 2 {
+        return Err("Bilibili API keeps rejecting the request (-799)".to_string());
+    }
+    let cid = get_cid(bvid)?;
+
+    let url = make_signed_url(
+        "https://api.bilibili.com/x/player/wbi/v2",
+        &[("bvid", bvid), ("cid", &cid.to_string())],
+    )?;
+
+    let json: serde_json::Value = fetch_json_with_retry(&url, "lyrics")?;
+
+    let code = json["code"].as_i64().unwrap_or(-1);
+    if code == -799 {
+        let mut cache = WBI_CACHE.lock().unwrap();
+        *cache = None;
+        return get_bilibili_lyrics_inner(bvid, attempt + 1);
+    }
+    if code != 0 {
+        let msg = json["message"].as_str().unwrap_or("Unknown error");
+        return Err(format!("Lyrics API error ({}): {}", code, msg));
+    }
+
+    let lyric = json["data"]["lyric"].as_str().unwrap_or("").trim().to_string();
+    if lyric.is_empty() {
+        return Err("No lyrics available for this video".to_string());
+    }
+    Ok(lyric)
+}
+
+/// Get the best audio stream URL for a Bilibili video.
+fn get_audio_url(bvid: &str) -> Result<String, String> {
+    let cid = get_cid(bvid)?;
 
     // Get the play URL with DASH format (fnval=16 → separate audio/video streams).
     let play_url = make_signed_url(
@@ -542,7 +628,7 @@ pub fn download_online_audio(
 
     let name = file_name
         .map(|n| sanitize_filename(n))
-        .unwrap_or_else(|| bvid.to_string());
+        .unwrap_or_else(|| sanitize_filename(bvid));
     let out_path = out_dir.join(format!("{}.{}", name, ext));
 
     // Download the file.
@@ -810,6 +896,45 @@ fn run_ytdlp(query_or_url: &str, extra_args: &[&str]) -> Result<String, String> 
 
 // ─── YouTube Audio Download ───────────────────────────
 
+/// Extract the 11-char video id from a YouTube URL (watch?v=, youtu.be/,
+/// shorts/, embed/). Returns None when the id can't be determined.
+pub fn extract_youtube_id(url: &str) -> Option<String> {
+    if let Some(pos) = url.find("v=") {
+        let id = url[pos + 2..].split('&').next().unwrap_or("").to_string();
+        if !id.is_empty() && id.len() <= 20 {
+            return Some(id);
+        }
+    }
+    for marker in ["youtu.be/", "/shorts/", "/embed/"] {
+        if let Some(pos) = url.find(marker) {
+            let id = url[pos + marker.len()..]
+                .split(['/', '?', '&'])
+                .next()
+                .unwrap_or("")
+                .to_string();
+            if !id.is_empty() {
+                return Some(id);
+            }
+        }
+    }
+    None
+}
+
+/// Find a cached file whose name starts with the given id (yt-dlp's output
+/// template is `%(id)s.%(ext)s` when no custom file name is used).
+fn find_cached_file_by_id(dir: &Path, id: &str) -> Option<PathBuf> {
+    if let Ok(entries) = std::fs::read_dir(dir) {
+        for entry in entries.flatten() {
+            let name = entry.file_name().to_string_lossy().to_string();
+            // Ignore in-progress partial downloads (.part).
+            if name.starts_with(id) && !name.ends_with(".part") {
+                return Some(entry.path());
+            }
+        }
+    }
+    None
+}
+
 /// Download audio from a YouTube URL using yt-dlp.
 /// Extracts best audio, converts to m4a.
 /// If file_name is provided, renames the downloaded file to that name.
@@ -824,6 +949,19 @@ pub fn download_youtube_audio(
     };
     std::fs::create_dir_all(&out_dir)
         .map_err(|e| format!("Cannot create dir: {}", e))?;
+
+    // Check cache first (by video id). This makes repeat plays of the same
+    // video hit the temp cache instantly AND avoids a wrong-file mixup:
+    // yt-dlp skips existing outputs (--no-post-overwrites), so without a
+    // deterministic lookup the "most recently modified" heuristic could
+    // return a different video's file.
+    if file_name.is_none() {
+        if let Some(id) = extract_youtube_id(url) {
+            if let Some(cached) = find_cached_file_by_id(&out_dir, &id) {
+                return Ok(cached.to_string_lossy().to_string());
+            }
+        }
+    }
 
     // Build output template: %(id)s.%(ext)s in the target dir.
     let out_template = out_dir.join("%(id)s.%(ext)s");

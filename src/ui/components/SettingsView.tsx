@@ -31,7 +31,7 @@ const DEFAULTS: Settings = {
   // Dynamic Island
   dynIslandEnabled: "false", dynIslandAlwaysOnTop: "true",
   dynIslandColor: "#1a1a2e", dynIslandBlur: "20", dynIslandSize: "300",
-  dynIslandOpacity: "85",
+  dynIslandOpacity: "85", dynIslandLyrics: "false",
   // Cache
   maxCacheMb: "500",
   // Online Search
@@ -56,6 +56,10 @@ const SettingsView: React.FC<Props> = ({ onTracksLoaded }) => {
   const [clearingCache, setClearingCache] = useState(false);
   const [ytDlpAvailable, setYtDlpAvailable] = useState(false);
   const [downloadPath, setDownloadPath] = useState("");
+  // LAN Sync (experimental)
+  const [lanUrl, setLanUrl] = useState("");
+  const [lanBusy, setLanBusy] = useState(false);
+  const [lanError, setLanError] = useState<string | null>(null);
   const bgImageInputRef = useRef<HTMLInputElement>(null);
   const db = DatabaseManager.getInstance();
 
@@ -378,8 +382,57 @@ const SettingsView: React.FC<Props> = ({ onTracksLoaded }) => {
               }} />
               <span style={{ fontSize:11, color:"var(--text-tertiary)", width:32 }}>{settings.dynIslandSize}px</span>
             </label>
+            <label className="settings-check">
+              <input type="checkbox" checked={settings.dynIslandLyrics === "true"} onChange={async e => {
+                const val = e.target.checked ? "true" : "false";
+                await save("dynIslandLyrics", val);
+              }} />
+              Show lyrics <span style={{ fontSize:10, color:"var(--text-tertiary)", marginLeft:4 }}>(when the track has lyrics)</span>
+            </label>
           </div>
         )}
+      </section>
+
+      {/* ── LAN Sync (experimental) ── */}
+      <section><h3><IconSettings size={16} style={{ marginRight: 6 }} />LAN Sync <span style={{ fontSize:10, color:"var(--text-tertiary)", fontWeight:400 }}>(experimental)</span></h3>
+        <p style={{ fontSize:12, color:"var(--text-tertiary)", marginBottom:10, lineHeight:1.5 }}>
+          Share your library with the web app on your phone (same Wi-Fi, e.g. Safari on iPhone).
+          Start the server, then open the shown address on the phone — it streams tracks straight from this computer.
+          No authentication; only use on trusted networks.
+        </p>
+        {lanUrl && (
+          <div style={{ marginBottom:10 }}>
+            <code style={{ fontSize:12, background:"rgba(255,255,255,.06)", padding:"6px 10px", borderRadius:6, color:"var(--text-body)", wordBreak:"break-all", display:"inline-block" }}>{lanUrl}</code>
+            <button
+              className="settings-btn"
+              style={{ marginLeft:8, padding:"4px 10px", fontSize:12 }}
+              onClick={async () => { try { await navigator.clipboard.writeText(lanUrl); } catch { /* ignore */ } }}
+            >Copy</button>
+          </div>
+        )}
+        {lanError && <p style={{ fontSize:12, color:"var(--color-error)", marginBottom:8 }}>{lanError}</p>}
+        <button
+          className={`settings-btn ${lanUrl ? "" : "primary"}`}
+          disabled={lanBusy}
+          onClick={async () => {
+            setLanBusy(true); setLanError(null);
+            try {
+              if (lanUrl) {
+                await invoke("lan_server_stop");
+                setLanUrl("");
+              } else {
+                const url = await invoke<string>("lan_server_start");
+                setLanUrl(url);
+              }
+            } catch (e) {
+              setLanError(String(e));
+            } finally {
+              setLanBusy(false);
+            }
+          }}
+        >
+          {lanBusy ? "…" : lanUrl ? "Stop Server" : "Start Server"}
+        </button>
       </section>
 
       <section><h3><IconSettings size={16} style={{ marginRight: 6 }} />Behavior</h3>

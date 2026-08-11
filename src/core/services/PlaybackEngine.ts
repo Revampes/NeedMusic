@@ -39,6 +39,13 @@ export class PlaybackEngine {
   private progressInterval: ReturnType<typeof setInterval> | null = null;
   private _isHandlingTrackEnd = false;
 
+  // ── Sink-stall detection (e.g. silent playback after OS sleep) ──
+  private stallCheckTick = 0;
+  private lastRustPos = -1.0;
+  private lastClientPosAtRust = 0.0;
+  /** Bumped on every sink rebuild so stale stall checks can be discarded. */
+  private seekVersion = 0;
+
   private constructor() {}
 
   // ─── Singleton Access ──────────────────────────────────────
@@ -141,6 +148,7 @@ export class PlaybackEngine {
     await this.audioOutput.play(track.filePath);
     this.audioOutput.setVolume(this._volume);
     this.audioOutput.setPlaybackRate(this._playbackRate);
+    this.resetStallBaseline(); // new sink — restart stall detection baseline
     this.setState(PlaybackState.Playing);
     this.startProgressUpdates();
     this.notifyTrackChange();
@@ -194,6 +202,7 @@ export class PlaybackEngine {
       this._playingTrack = null; // playing from queue now
       await this.audioOutput?.play(track.filePath);
       this.audioOutput?.setVolume(this._volume);
+      this.resetStallBaseline();
       this.setState(PlaybackState.Playing);
       this.startProgressUpdates();
       this.notifyTrackChange();
@@ -230,6 +239,7 @@ export class PlaybackEngine {
       this._playingTrack = null; // playing from queue now
       await this.audioOutput?.play(track.filePath);
       this.audioOutput?.setVolume(this._volume);
+      this.resetStallBaseline();
       this.setState(PlaybackState.Playing);
       this.startProgressUpdates();
       this.notifyTrackChange();
@@ -238,6 +248,7 @@ export class PlaybackEngine {
   }
 
   async seek(seconds: number): Promise<void> {
+    this.resetStallBaseline(); // a seek rebuilds the sink — start baseline fresh
     await this.audioOutput?.seek(seconds);
     // Refresh Discord RPC so the progress bar reflects the new position.
     const isPlaying = this._state === PlaybackState.Playing;
@@ -314,6 +325,7 @@ export class PlaybackEngine {
     if (track) {
       await this.audioOutput?.play(track.filePath);
       this.audioOutput?.setVolume(this._volume);
+      this.resetStallBaseline();
       this.setState(PlaybackState.Playing);
       this.startProgressUpdates();
       this.notifyTrackChange();
@@ -369,6 +381,15 @@ export class PlaybackEngine {
       if (Math.round(current * 2) % 2 === 0) {
         this.checkSinkEnded();
       }
+
+      // Every 4th tick (~1s): verify the Rust audio sink is actually making
+      // progress. After OS sleep the WASAPI stream can die silently — the
+      // client-side clock keeps advancing (progress bar moves) but no sound
+      // comes out. Rebuild the sink at the current position to recover.
+      this.stallCheckTick += 1;
+      if (this.stallCheckTick % 4 === 0) {
+        this.checkSinkStalled();
+      }
     }, 250);
   }
 
@@ -398,6 +419,58 @@ export class PlaybackEngine {
     } catch {
       // Non-critical: if the command isn't available, fall through.
     }
+  }
+
+  /**
+   * Polls the Rust audio backend for the sink's real playback position.
+   * If the client-side clock advances while the sink makes no progress,
+   * the audio device is stalled (typical after sleep/resume) — rebuild the
+   * sink at the current position so sound resumes.
+   */
+  private async checkSinkStalled(): Promise<void> {
+    if (this._isHandlingTrackEnd || this._state !== PlaybackState.Playing) return;
+    const trackIdAtCheck = this.currentTrack?.id;
+    const versionAtCheck = this.seekVersion;
+    try {
+      const rustPos = await invoke<number>("get_audio_position");
+      // Guard: a track change / seek may have happened while the IPC was
+      // in flight — never act on stale state.
+      if (
+        this.seekVersion !== versionAtCheck ||
+        this.currentTrack?.id !== trackIdAtCheck ||
+        this._state !== PlaybackState.Playing
+      ) {
+        return;
+      }
+      const clientPos = this.getCurrentTime();
+
+      if (this.lastRustPos >= 0) {
+        const clientAdvanced = clientPos - this.lastClientPosAtRust;
+        const rustAdvanced = rustPos - this.lastRustPos;
+        if (clientPos > 2.0 && clientAdvanced >= 0.4 && rustAdvanced < 0.05) {
+          console.warn(
+            "[PlaybackEngine] Audio sink stalled (client advanced " +
+              clientAdvanced.toFixed(2) + "s, sink advanced " + rustAdvanced.toFixed(2) +
+              "s). Rebuilding at " + clientPos.toFixed(1) + "s."
+          );
+          // Reset baseline so we don't immediately re-trigger.
+          this.lastRustPos = -1.0;
+          await this.seek(clientPos);
+          return;
+        }
+      }
+      this.lastRustPos = rustPos;
+      this.lastClientPosAtRust = clientPos;
+    } catch {
+      // Command unavailable (e.g. web build) — non-critical.
+    }
+  }
+
+  /** Forget the stall-detection baseline (called after any sink rebuild). */
+  private resetStallBaseline(): void {
+    this.seekVersion += 1;
+    this.lastRustPos = -1.0;
+    this.lastClientPosAtRust = 0.0;
   }
 
   /**

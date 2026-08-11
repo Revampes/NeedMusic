@@ -1,5 +1,6 @@
-import React, { useState, useEffect, useCallback } from "react";
+import React, { useState, useEffect, useCallback, useRef } from "react";
 import { invoke } from "@tauri-apps/api/core";
+import { PlaybackEngine, PlaybackState } from "@core/services/PlaybackEngine";
 
 interface EqBandInfo {
   freq: number;
@@ -39,6 +40,34 @@ const EqSettings: React.FC = () => {
   const [selectedPreset, setSelectedPreset] = useState(-1);
   const [loading, setLoading] = useState(true);
 
+  // EQ gains are baked into the decoded samples, so changing them mid-playback
+  // has no audible effect until the track is re-decoded. Debounce the change and
+  // re-seek to the current position to re-apply the EQ to the playing track.
+  const reapplyTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  const scheduleReapply = useCallback(() => {
+    if (reapplyTimer.current) clearTimeout(reapplyTimer.current);
+    reapplyTimer.current = setTimeout(async () => {
+      const engine = PlaybackEngine.getInstance();
+      const state = engine.state;
+      const trackId = engine.currentTrack?.id;
+      if (!trackId) return;
+      if (state !== PlaybackState.Playing && state !== PlaybackState.Paused) return;
+      // If the track changed during the debounce window, don't seek the new
+      // track to the old track's position.
+      if (engine.currentTrack?.id !== trackId) return;
+      try {
+        const pos = engine.getCurrentTime();
+        // Re-seek rebuilds the sink with the newly applied EQ gains.
+        await engine.seek(pos);
+      } catch (e) {
+        console.error("Failed to re-apply EQ:", e);
+      }
+    }, 250);
+  }, []);
+
+  useEffect(() => () => { if (reapplyTimer.current) clearTimeout(reapplyTimer.current); }, []);
+
   const loadEqState = useCallback(async () => {
     try {
       const state = await invoke<EqState>("get_eq_state");
@@ -56,10 +85,11 @@ const EqSettings: React.FC = () => {
     try {
       await invoke("set_eq_enabled", { enabled });
       setEqState((prev) => prev ? { ...prev, enabled } : null);
+      scheduleReapply();
     } catch (e) {
       console.error("Failed to toggle EQ:", e);
     }
-  }, []);
+  }, [scheduleReapply]);
 
   const handleBandChange = useCallback(async (index: number, gain_db: number) => {
     try {
@@ -71,20 +101,22 @@ const EqSettings: React.FC = () => {
         return { ...prev, bands };
       });
       setSelectedPreset(-1);
+      scheduleReapply();
     } catch (e) {
       console.error("Failed to set EQ band:", e);
     }
-  }, []);
+  }, [scheduleReapply]);
 
   const handlePreset = useCallback(async (index: number) => {
     try {
       await invoke("apply_eq_preset", { presetIndex: index });
       await loadEqState();
       setSelectedPreset(index);
+      scheduleReapply();
     } catch (e) {
       console.error("Failed to apply preset:", e);
     }
-  }, [loadEqState]);
+  }, [loadEqState, scheduleReapply]);
 
   if (loading) return <div style={{ fontSize: 13, color: "var(--text-tertiary)", padding: "8px 0" }}>Loading equalizer...</div>;
   if (!eqState) return <div style={{ fontSize: 13, color: "var(--color-error)", padding: "8px 0" }}>EQ unavailable</div>;

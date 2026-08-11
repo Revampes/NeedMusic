@@ -26,6 +26,8 @@ pub struct NativeAudioPlayer {
     /// Cached EQ band gains for processing decoded audio.
     eq_gains: Mutex<[f64; 5]>,
     eq_enabled: Mutex<bool>,
+    /// Playback speed multiplier (rodio Sink::set_speed).
+    playback_rate: Mutex<f32>,
 }
 
 impl NativeAudioPlayer {
@@ -37,7 +39,31 @@ impl NativeAudioPlayer {
             current_duration: Mutex::new(0.0),
             eq_gains: Mutex::new([0.0_f64; 5]),
             eq_enabled: Mutex::new(true),
+            playback_rate: Mutex::new(1.0),
         }
+    }
+
+    /// Set the playback speed multiplier (e.g. 1.5 = 1.5x).
+    pub fn set_playback_rate(&self, rate: f32) {
+        let r = rate.clamp(0.25, 4.0);
+        if let Ok(mut s) = self.playback_rate.lock() {
+            *s = r;
+        }
+        if let Ok(g) = self.sink.lock() {
+            if let Some(ref sink) = *g {
+                sink.set_speed(r);
+            }
+        }
+    }
+
+    /// Current playback position within the loaded track (seconds), read
+    /// directly from the rodio sink. Accounts for playback speed.
+    pub fn get_position(&self) -> f64 {
+        self.sink
+            .lock()
+            .ok()
+            .and_then(|g| g.as_ref().map(|s| s.get_pos().as_secs_f64()))
+            .unwrap_or(0.0)
     }
 
     /// Set the EQ band gains. Values are in dB.
@@ -194,6 +220,8 @@ impl NativeAudioPlayer {
 
         let sink = Sink::try_new(&self.stream_handle)
             .map_err(|e| format!("Sink: {}", e))?;
+        let rate = *self.playback_rate.lock().map_err(|e| e.to_string())?;
+        sink.set_speed(rate);
         sink.append(source);
         sink.play();
 
@@ -271,7 +299,9 @@ impl NativeAudioPlayer {
 
             let sink = Sink::try_new(&self.stream_handle)
                 .map_err(|e| format!("Sink: {}", e))?;
+            let rate = *self.playback_rate.lock().map_err(|e| e.to_string())?;
             sink.set_volume(vol);
+            sink.set_speed(rate);
             sink.append(source);
             sink.play();
             *self.sink.lock().map_err(|e| e.to_string())? = Some(sink);

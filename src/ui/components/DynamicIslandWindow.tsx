@@ -79,6 +79,7 @@ html,body{height:100%;overflow:hidden;background:transparent!important;font-fami
 .di-up-next-artist { font-size:10px; color:rgba(255,255,255,.3); overflow:hidden; text-overflow:ellipsis; white-space:nowrap; display:block; margin-top:1px; }
 .di-empty { text-align:center; padding:30px 16px; color:rgba(255,255,255,.3); font-size:13px; }
 .di-empty-icon { font-size:28px; margin-bottom:8px; display:block; }
+.di-lyric { font-size:11px; color:rgba(255,255,255,.75); text-align:center; padding:6px 8px; margin:2px 0 6px; background:rgba(255,255,255,.06); border-radius:8px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; text-shadow:0 1px 3px rgba(0,0,0,.4); }
 `;
 
 function fmtTime(secs: number): string {
@@ -94,6 +95,8 @@ interface IslandState {
   currentTimeSecs: number;
   durationSecs: number;
   nextTrack: { title: string; artist: string } | null;
+  /** Current lyric line (null when the track has no lyrics). */
+  lyric?: string | null;
 }
 
 const DynamicIslandWindow: React.FC = () => {
@@ -102,6 +105,7 @@ const DynamicIslandWindow: React.FC = () => {
     currentTimeSecs: 0, durationSecs: 0, nextTrack: null,
   });
   const islandRef = useRef<HTMLDivElement>(null);
+  const [lyricsEnabled, setLyricsEnabled] = useState(false);
 
   // ── Load saved style settings ──
   useEffect(() => {
@@ -117,6 +121,8 @@ const DynamicIslandWindow: React.FC = () => {
       if (size) document.documentElement.style.setProperty("--dyn-island-width", `${size}px`);
       const acc = await db.getSetting("themeAccent");
       if (acc) { document.documentElement.style.setProperty("--accent-primary", acc); }
+      const lyrics = await db.getSetting("dynIslandLyrics");
+      setLyricsEnabled(lyrics === "true");
     })();
   }, []);
 
@@ -148,6 +154,8 @@ const DynamicIslandWindow: React.FC = () => {
       if (size) document.documentElement.style.setProperty("--dyn-island-width", `${size}px`);
       const acc = await db.getSetting("themeAccent");
       if (acc) { document.documentElement.style.setProperty("--accent-primary", acc); }
+      const lyrics = await db.getSetting("dynIslandLyrics");
+      setLyricsEnabled(lyrics === "true");
     }, 3000);
     return () => clearInterval(interval);
   }, []);
@@ -243,6 +251,12 @@ const DynamicIslandWindow: React.FC = () => {
                 <IconNext size={15} />
               </button>
             </div>
+
+            {lyricsEnabled && state.lyric && (
+              <div className="di-lyric" title={state.lyric}>
+                {state.lyric}
+              </div>
+            )}
 
             {state.nextTrack && (
               <div className="di-up-next">

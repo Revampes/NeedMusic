@@ -120,7 +120,12 @@ const HomeView: React.FC<HomeViewProps> = ({ tracks, currentTrack, onPlay }) => 
                     {t.hasArtwork ? <IconDisc size={18} /> : <IconMusic size={18} />}
                   </div>
                   <div className="hmt-info">
-                    <div className="hmt-title">{t.title}</div>
+                    <div className="hmt-title">
+                      {t.title}
+                      {t.isOnlineTrack() && (
+                        <span className="track-online-badge" title="Saved without downloading — plays via the source API">Online</span>
+                      )}
+                    </div>
                     <div className="hmt-artist">{t.artist}</div>
                   </div>
                   <div className="hmt-dur">{formatDuration(t.durationSecs)}</div>
@@ -160,7 +165,12 @@ const HomeView: React.FC<HomeViewProps> = ({ tracks, currentTrack, onPlay }) => 
                     {t.hasArtwork ? <IconDisc size={18} /> : <IconMusic size={18} />}
                   </div>
                   <div className="hmt-info">
-                    <div className="hmt-title">{t.title}</div>
+                    <div className="hmt-title">
+                      {t.title}
+                      {t.isOnlineTrack() && (
+                        <span className="track-online-badge" title="Saved without downloading — plays via the source API">Online</span>
+                      )}
+                    </div>
                     <div className="hmt-artist">{t.artist}</div>
                   </div>
                   <div className="hmt-dur">{formatDuration(t.durationSecs)}</div>

@@ -248,18 +248,12 @@ impl DiscordRpcManager {
             }
         });
 
-        // Always send timestamps so the Discord bar reflects the current position,
-        // even after seeking while paused.
-        if duration_secs > 0.0 {
+        // Send timestamps only while playing. Discord animates the progress
+        // bar from `start` → `end`; keeping them while paused would make the
+        // bar keep moving even though the music is paused.
+        if is_playing && duration_secs > 0.0 {
             let start_ts = now - (position_secs as i64);
-            let end_ts = if is_playing {
-                start_ts + (duration_secs as i64)
-            } else {
-                // Paused: still show the bar at the current position.
-                // Discord will show elapsed time increasing (limitation of
-                // the protocol), but the remaining time stays accurate.
-                now + (duration_secs as i64) - (position_secs as i64)
-            };
+            let end_ts = start_ts + (duration_secs as i64);
             activity["timestamps"] = json!({
                 "start": start_ts,
                 "end": end_ts

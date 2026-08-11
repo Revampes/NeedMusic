@@ -12,6 +12,7 @@ mod audio;
 mod audio_eq;
 mod discord_rpc;
 mod online;
+mod lan_server;
 
 pub use scanner::LibraryScanner;
 pub use concurrency::ConcurrencyGate;
@@ -19,6 +20,7 @@ pub use audio::NativeAudioPlayer;
 pub use audio_eq::{Equalizer, EqBand, EqPreset, EQ_PRESETS};
 pub use discord_rpc::DiscordRpcManager;
 pub use online::{OnlineTrackResult, OnlineSearchResult, CombinedSearchResult};
+pub use lan_server::{LanServer, LanTrack};
 
 pub struct AppState {
     pub scanner: Mutex<LibraryScanner>,
@@ -28,6 +30,7 @@ pub struct AppState {
     pub audio: NativeAudioPlayer,
     pub equalizer: Mutex<Equalizer>,
     pub discord_rpc: DiscordRpcManager,
+    pub lan_server: LanServer,
 }
 
 #[derive(Debug, Clone, serde::Serialize)]
@@ -297,6 +300,17 @@ async fn set_audio_volume(volume: f32, state: State<'_, AppState>) -> Result<(),
 }
 
 #[tauri::command]
+async fn set_playback_rate(rate: f32, state: State<'_, AppState>) -> Result<(), String> {
+    state.audio.set_playback_rate(rate);
+    Ok(())
+}
+
+#[tauri::command]
+async fn get_audio_position(state: State<'_, AppState>) -> Result<f64, String> {
+    Ok(state.audio.get_position())
+}
+
+#[tauri::command]
 async fn is_audio_playing(state: State<'_, AppState>) -> Result<bool, String> {
     Ok(state.audio.is_playing())
 }
@@ -527,6 +541,51 @@ fn get_default_download_dir() -> Result<String, String> {
 
 // ─── Online / Bilibili & YouTube Commands ────────────────
 
+/// Fetch LRC lyrics for an online track. Only Bilibili currently exposes
+/// lyrics through its public API; YouTube returns an error (no lyrics).
+#[tauri::command]
+async fn get_online_lyrics(source: String, id_or_url: String) -> Result<String, String> {
+    let s = source.clone();
+    let i = id_or_url.clone();
+    tokio::task::spawn_blocking(move || {
+        if s == "bilibili" {
+            online::get_bilibili_lyrics(&i)
+        } else {
+            Err("Lyrics are only available for Bilibili tracks".to_string())
+        }
+    })
+    .await
+    .map_err(|e| format!("Lyrics task panicked: {}", e))?
+}
+
+// ─── LAN Sync (experimental) Commands ───────────────────
+
+/// Start the LAN sync server and return the URL to open on the phone.
+#[tauri::command]
+async fn lan_server_start(state: State<'_, AppState>) -> Result<String, String> {
+    state.lan_server.start()
+}
+
+#[tauri::command]
+async fn lan_server_stop(state: State<'_, AppState>) -> Result<(), String> {
+    state.lan_server.stop();
+    Ok(())
+}
+
+#[tauri::command]
+async fn lan_server_url(state: State<'_, AppState>) -> Result<String, String> {
+    state.lan_server.url()
+}
+
+#[tauri::command]
+async fn lan_set_library(
+    tracks: Vec<LanTrack>,
+    state: State<'_, AppState>,
+) -> Result<(), String> {
+    state.lan_server.set_library(tracks);
+    Ok(())
+}
+
 #[tauri::command]
 async fn search_bilibili(query: String) -> Result<OnlineSearchResult, String> {
     let q = query.clone();
@@ -544,22 +603,14 @@ async fn search_youtube(query: String) -> Result<OnlineSearchResult, String> {
 }
 
 /// Search both Bilibili and YouTube simultaneously.
-/// Returns a CombinedSearchResult with separate result sets.
+/// Returns a CombinedSearchResult with separate result sets. Tolerant of
+/// per-source failures (results from the working source are still returned).
 #[tauri::command]
 async fn search_combined(query: String) -> Result<CombinedSearchResult, String> {
-    let q_bili = query.clone();
-    let q_yt = query.clone();
-
-    let (bili, yt) = tokio::try_join!(
-        tokio::task::spawn_blocking(move || online::search_bilibili(&q_bili)),
-        tokio::task::spawn_blocking(move || online::search_youtube(&q_yt)),
-    )
-    .map_err(|e| format!("Combined search panicked: {}", e))?;
-
-    Ok(CombinedSearchResult {
-        bilibili: bili?,
-        youtube: yt?,
-    })
+    let q = query.clone();
+    tokio::task::spawn_blocking(move || Ok(online::search_combined(&q)))
+        .await
+        .map_err(|e| format!("Combined search panicked: {}", e))?
 }
 
 #[tauri::command]
@@ -1012,6 +1063,7 @@ pub fn run() {
                 audio: audio_player,
                 equalizer,
                 discord_rpc,
+                lan_server: LanServer::new(),
             });
 
             Ok(())
@@ -1034,6 +1086,8 @@ pub fn run() {
             stop_audio,
             seek_audio,
             set_audio_volume,
+            set_playback_rate,
+            get_audio_position,
             is_audio_playing,
             get_audio_duration,
             is_audio_sink_empty,
@@ -1046,12 +1100,17 @@ pub fn run() {
             search_bilibili,
             search_youtube,
             search_combined,
+            get_online_lyrics,
             download_online_audio,
             get_default_download_dir,
             is_ytdlp_available,
             proxy_image,
             get_online_cache_info,
             clear_online_cache,
+            lan_server_start,
+            lan_server_stop,
+            lan_server_url,
+            lan_set_library,
             set_eq_enabled,
             set_eq_band_gain,
             get_eq_state,
