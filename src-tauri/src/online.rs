@@ -6,12 +6,14 @@
 ///           User must enable YouTube search in Settings (grey area).
 
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Command, Stdio};
 use std::sync::Mutex;
 
 #[cfg(target_os = "windows")]
 use std::os::windows::process::CommandExt;
 use std::time::{SystemTime, UNIX_EPOCH};
+
+use id3::TagLike;
 
 // ─── Types ────────────────────────────────────────────
 
@@ -591,6 +593,260 @@ fn sanitize_filename(name: &str) -> String {
     if s.is_empty() { "Unknown".to_string() } else { s }
 }
 
+/// True if ffmpeg is available on PATH.
+fn is_ffmpeg_available() -> bool {
+    let mut cmd = Command::new("ffmpeg");
+    #[cfg(target_os = "windows")]
+    cmd.creation_flags(0x08000000);
+    cmd.arg("-version")
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .output()
+        .map(|o| o.status.success())
+        .unwrap_or(false)
+}
+
+/// Where NeedMusic keeps its bundled tools (e.g. ffmpeg.exe).
+fn needmusic_bin_dir() -> PathBuf {
+    let base = std::env::var("APPDATA")
+        .map(PathBuf::from)
+        .unwrap_or_else(|_| std::env::temp_dir());
+    base.join("NeedMusic").join("bin")
+}
+
+fn bundled_ffmpeg_path() -> PathBuf {
+    needmusic_bin_dir().join("ffmpeg.exe")
+}
+
+/// Recursively find ffmpeg.exe under `dir` (the archive nests it in a bin/).
+fn find_ffmpeg_exe(dir: &Path) -> Option<PathBuf> {
+    if let Ok(entries) = std::fs::read_dir(dir) {
+        for entry in entries.flatten() {
+            let p = entry.path();
+            if p.is_dir() {
+                if let Some(found) = find_ffmpeg_exe(&p) {
+                    return Some(found);
+                }
+            } else if p
+                .file_name()
+                .and_then(|n| n.to_str())
+                .map(|n| n.eq_ignore_ascii_case("ffmpeg.exe"))
+                .unwrap_or(false)
+            {
+                return Some(p);
+            }
+        }
+    }
+    None
+}
+
+/// Serializes ffmpeg install attempts so the startup background install and a
+/// user-triggered conversion never download/extract concurrently (which would
+/// corrupt the same temp paths).
+static FFMPEG_INSTALL_LOCK: Mutex<()> = Mutex::new(());
+
+/// Download a static ffmpeg build and install it into NeedMusic's bin folder.
+/// Runs once on first use so MP3 conversion "just works" after install.
+fn download_and_install_ffmpeg(dest: &Path) -> Result<(), String> {
+    // GitHub/BtbN first: its CDN is far faster than gyan.dev on most
+    // connections (a 170 MB build here finished in seconds, while gyan's
+    // 80 MB archive crawled at ~100 KB/s). gyan is the fallback.
+    const URLS: &[&str] = &[
+        "https://github.com/BtbN/FFmpeg-Builds/releases/latest/download/ffmpeg-master-latest-win64-gpl.zip",
+        "https://www.gyan.dev/ffmpeg/builds/ffmpeg-release-essentials.zip",
+    ];
+    let tmp_zip = std::env::temp_dir().join("needmusic_ffmpeg.zip");
+    let extract_dir = std::env::temp_dir().join("needmusic_ffmpeg_extract");
+
+    // Dedicated client with a LONG timeout — the archive is ~80 MB, and the
+    // default 20 s client would kill the download on slower connections.
+    let client = reqwest::blocking::Client::builder()
+        .user_agent("NeedMusic-FFmpeg-Installer")
+        .timeout(std::time::Duration::from_secs(900))
+        .build()
+        .map_err(|e| format!("failed to build download client: {}", e))?;
+
+    let mut last_err = String::from("no ffmpeg download URL tried");
+    for url in URLS {
+        match client.get(*url).send() {
+            Ok(mut resp) if resp.status().is_success() => {
+                let mut file = std::fs::File::create(&tmp_zip)
+                    .map_err(|e| format!("cannot create temp file: {}", e))?;
+                if let Err(e) = resp.copy_to(&mut file) {
+                    last_err = format!("ffmpeg download write failed: {}", e);
+                    drop(file);
+                    continue;
+                }
+                drop(file);
+                last_err = String::new();
+                break;
+            }
+            Ok(resp) => {
+                last_err = format!("ffmpeg download HTTP {}", resp.status());
+            }
+            Err(e) => {
+                last_err = format!("ffmpeg download failed: {}", e);
+            }
+        }
+    }
+    if !last_err.is_empty() {
+        return Err(last_err);
+    }
+
+    // Extract with Windows' built-in Expand-Archive (no extra dependencies).
+    let _ = std::fs::remove_dir_all(&extract_dir);
+    std::fs::create_dir_all(&extract_dir)
+        .map_err(|e| format!("cannot create extract dir: {}", e))?;
+    let mut ps = Command::new("powershell");
+    #[cfg(target_os = "windows")]
+    ps.creation_flags(0x08000000);
+    let status = ps
+        .args([
+            "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command",
+            &format!(
+                "Expand-Archive -Force -Path '{}' -DestinationPath '{}'",
+                tmp_zip.to_string_lossy(),
+                extract_dir.to_string_lossy()
+            ),
+        ])
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .map_err(|e| format!("failed to run powershell: {}", e))?;
+    if !status.success() {
+        return Err("failed to extract ffmpeg archive".to_string());
+    }
+
+    let found = find_ffmpeg_exe(&extract_dir)
+        .ok_or("ffmpeg.exe not found in downloaded archive".to_string())?;
+    let parent = dest.parent().unwrap_or(Path::new("."));
+    std::fs::create_dir_all(parent)
+        .map_err(|e| format!("cannot create bin dir: {}", e))?;
+    std::fs::copy(&found, dest)
+        .map_err(|e| format!("cannot install ffmpeg.exe: {}", e))?;
+
+    // Cleanup.
+    let _ = std::fs::remove_file(&tmp_zip);
+    let _ = std::fs::remove_dir_all(&extract_dir);
+    Ok(())
+}
+
+/// Resolve ffmpeg: PATH first, then the bundled copy; downloads it on first
+/// use when neither exists. Returns the command/path to invoke.
+pub fn ensure_ffmpeg() -> Result<PathBuf, String> {
+    if is_ffmpeg_available() {
+        return Ok(PathBuf::from("ffmpeg"));
+    }
+    let bundled = bundled_ffmpeg_path();
+    if bundled.is_file() {
+        return Ok(bundled);
+    }
+
+    // One download at a time; re-check inside the lock in case another thread
+    // (e.g. the startup pre-install) just finished installing it.
+    let _guard = FFMPEG_INSTALL_LOCK
+        .lock()
+        .map_err(|e| format!("ffmpeg install lock poisoned: {}", e))?;
+    if is_ffmpeg_available() {
+        return Ok(PathBuf::from("ffmpeg"));
+    }
+    if bundled.is_file() {
+        return Ok(bundled);
+    }
+    download_and_install_ffmpeg(&bundled)?;
+    Ok(bundled)
+}
+
+/// Convert an audio file to MP3 in the same directory and remove the original.
+/// MP3 plays on every platform (including iPhone Safari), so online saves
+/// prefer it over the MP4/M4A/WebM containers the sources return.
+fn convert_to_mp3(input: &Path) -> Result<PathBuf, String> {
+    let ffmpeg = ensure_ffmpeg()?;
+    let out = input.with_extension("mp3");
+    let mut cmd = Command::new(&ffmpeg);
+    #[cfg(target_os = "windows")]
+    cmd.creation_flags(0x08000000);
+    let status = cmd
+        .args([
+            "-y", "-i", input.to_str().unwrap_or(""),
+            // Copy metadata from the source (m4a/mp4) into the mp3 — without
+            // this ffmpeg strips tags and the app shows "Unknown".
+            "-map_metadata", "0",
+            "-vn", "-c:a", "libmp3lame", "-q:a", "2",
+            out.to_str().unwrap_or(""),
+        ])
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .map_err(|e| format!("Failed to run ffmpeg: {}", e))?;
+    if !status.success() {
+        return Err("ffmpeg conversion to MP3 failed".to_string());
+    }
+    // Remove the non-MP3 original (best-effort — we only want the MP3).
+    let _ = std::fs::remove_file(input);
+    Ok(out)
+}
+
+/// Convert a downloaded online file to MP3 when ffmpeg is available.
+/// Falls back to the original file when ffmpeg can't be obtained.
+fn ensure_mp3(path: PathBuf) -> PathBuf {
+    if path.extension().and_then(|e| e.to_str()).map(|e| e.eq_ignore_ascii_case("mp3")).unwrap_or(false) {
+        return path;
+    }
+    match convert_to_mp3(&path) {
+        Ok(mp3) => mp3,
+        Err(_) => path,
+    }
+}
+
+/// A file that was converted to MP3 (old path → new path).
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct ConvertedFile {
+    pub old_path: String,
+    pub new_path: String,
+}
+
+/// Result of converting a folder of saved audio to MP3.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct ConvertFolderResult {
+    pub converted: Vec<ConvertedFile>,
+    pub errors: Vec<String>,
+}
+
+/// Audio file extensions that should be converted to MP3 (online-save formats).
+const CONVERTIBLE_EXTS: [&str; 7] = ["m4a", "mp4", "webm", "m4s", "opus", "ogg", "aac"];
+
+/// Convert every convertible audio file directly inside `dir` to MP3,
+/// removing the originals. Returns old→new paths plus per-file errors.
+pub fn convert_saved_audio_to_mp3(dir: &str) -> Result<ConvertFolderResult, String> {    // Triggers the ffmpeg auto-install on first use (clear error if it fails).
+    let _ffmpeg = ensure_ffmpeg()?;
+    let mut converted = Vec::new();
+    let mut errors = Vec::new();
+
+    let entries = std::fs::read_dir(dir)
+        .map_err(|e| format!("Cannot read folder {}: {}", dir, e))?;
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if !path.is_file() { continue; }
+        let ext = path
+            .extension()
+            .and_then(|e| e.to_str())
+            .unwrap_or("")
+            .to_lowercase();
+        if !CONVERTIBLE_EXTS.contains(&ext.as_str()) { continue; }
+        let old_path = path.to_string_lossy().to_string();
+        match convert_to_mp3(&path) {
+            Ok(mp3) => converted.push(ConvertedFile {
+                old_path,
+                new_path: mp3.to_string_lossy().to_string(),
+            }),
+            Err(e) => errors.push(format!("{}: {}", old_path, e)),
+        }
+    }
+
+    Ok(ConvertFolderResult { converted, errors })
+}
+
 /// Download audio from a Bilibili video.
 /// If `download_dir` is provided, saves there instead of temp.
 /// If `file_name` is provided, uses it (sanitized) instead of bvid.
@@ -650,7 +906,9 @@ pub fn download_online_audio(
     resp.copy_to(&mut file)
         .map_err(|e| format!("Download write failed: {}", e))?;
 
-    Ok(out_path.to_string_lossy().to_string())
+    // Prefer MP3 (plays everywhere, incl. iPhone Safari). Falls back to the
+    // source container when ffmpeg is unavailable.
+    Ok(ensure_mp3(out_path).to_string_lossy().to_string())
 }
 
 /// Write basic metadata (title, artist, album) to an M4A/MP4 file.
@@ -668,6 +926,16 @@ pub fn write_m4a_metadata(file_path: &str, title: &str, artist: &str, album: &st
 
     tag.write_to_path(file_path)
         .map_err(|e| format!("Failed to write M4A metadata: {}", e))
+}
+
+/// Write ID3 metadata to an MP3 file.
+fn write_mp3_metadata(file_path: &str, title: &str, artist: &str, album: &str) -> Result<(), String> {
+    let mut tag = id3::Tag::read_from_path(file_path).unwrap_or_else(|_| id3::Tag::new());
+    tag.set_title(title);
+    tag.set_artist(artist);
+    tag.set_album(album);
+    tag.write_to_path(file_path, id3::Version::Id3v24)
+        .map_err(|e| format!("Failed to write MP3 metadata: {}", e))
 }
 
 fn find_cached_audio(dir: &Path, bvid: &str) -> Option<PathBuf> {
@@ -986,6 +1254,7 @@ pub fn download_youtube_audio(
         .ok_or("Download completed but could not locate output file".to_string())?;
 
     // Rename to desired filename if provided
+    let mut final_path = downloaded.clone();
     if let Some(name) = file_name {
         let ext = downloaded.extension()
             .and_then(|e| e.to_str())
@@ -994,11 +1263,13 @@ pub fn download_youtube_audio(
         if new_path != downloaded {
             std::fs::rename(&downloaded, &new_path)
                 .map_err(|e| format!("Failed to rename: {}", e))?;
-            return Ok(new_path.to_string_lossy().to_string());
+            final_path = new_path;
         }
     }
 
-    Ok(downloaded.to_string_lossy().to_string())
+    // Prefer MP3 (plays everywhere, incl. iPhone Safari). Falls back to the
+    // source container when ffmpeg is unavailable.
+    Ok(ensure_mp3(final_path).to_string_lossy().to_string())
 }
 
 /// Find the most recently modified file in a directory (the one yt-dlp just created).
@@ -1049,7 +1320,11 @@ pub fn download_online_audio_unified(
     // Write metadata if provided
     if let (Some(t), Some(a)) = (title, artist) {
         if !t.is_empty() {
-            let _ = write_m4a_metadata(&file_path, t, a, source);
+            if file_path.to_lowercase().ends_with(".mp3") {
+                let _ = write_mp3_metadata(&file_path, t, a, source);
+            } else {
+                let _ = write_m4a_metadata(&file_path, t, a, source);
+            }
         }
     }
 
@@ -1092,4 +1367,31 @@ pub fn proxy_image(url: &str) -> Result<String, String> {
 
     let b64 = base64::Engine::encode(&base64::engine::general_purpose::STANDARD, &bytes);
     Ok(format!("data:{};base64,{}", content_type, b64))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// One-off: actually download + install ffmpeg on this machine and verify
+    /// it runs. Run with: cargo test online::tests::auto_install_ffmpeg -- --ignored
+    #[test]
+    #[ignore = "downloads ~80 MB and installs ffmpeg into the app bin folder"]
+    fn auto_install_ffmpeg() {
+        let path = ensure_ffmpeg().expect("ffmpeg should download and install");
+        assert!(path.is_file(), "ffmpeg must exist at {}", path.display());
+        // Verify it actually runs.
+        let mut cmd = Command::new(&path);
+        #[cfg(target_os = "windows")]
+        cmd.creation_flags(0x08000000);
+        let ok = cmd
+            .arg("-version")
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .map(|s| s.success())
+            .unwrap_or(false);
+        assert!(ok, "installed ffmpeg must run: {}", path.display());
+        println!("ffmpeg installed and verified at {}", path.display());
+    }
 }

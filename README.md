@@ -35,11 +35,11 @@ After installing, point NeedMusic at your local music folder and it will automat
 
 ## 📦 Current Version
 
-**v2.0** — YouTube search & audio download.
+**v3.0** — LAN phone companion, dynamic-island style sync, one-click updates.
 
 | Component | Version |
 |-----------|---------|
-| NeedMusic App | `2.0` |
+| NeedMusic App | `3.0` |
 | Tauri Runtime | `2.x` |
 | React UI | `18.x` |
 | TypeScript | `5.5` |
@@ -147,10 +147,25 @@ npm run tauri build
 
 # Web app (outputs to dist-web/)
 npm run build:web
+
+# Build the web app AND publish it to the gh-pages branch (GitHub Pages)
+npm run deploy:web
 ```
 
 The Tauri build outputs the installer to `src-tauri/target/release/bundle/`.  
 The web build outputs static files to `dist-web/` — deploy these to any static host (Netlify, Vercel, Cloudflare Pages, etc.).
+
+> **`npm run deploy:web`** is the one-command flow for GitHub Pages: it runs the web build, then pushes `dist-web/` to the `gh-pages` branch (via a git worktree, reusing `../NeedMusic-pages` if you have one). The branch only contains the compiled site (`index.html`, `assets/`, `.nojekyll`) — never the source. Use `npm run deploy:web -- --dry-run` to preview the commit without pushing.
+
+### 📱 Phone Companion (LAN Sync)
+
+Stream your library to your phone over Wi-Fi — no cloud, no accounts:
+
+1. In the desktop app open **Settings → LAN Sync → Start Server**.
+2. Open the shown address (e.g. `http://192.168.1.10:17963/?token=…`) in Safari/Chrome on your phone.
+3. The web player loads **directly from your computer** (the LAN server serves the built web app) and syncs your library automatically — the token in the address keeps the API private.
+
+Online search on the phone is proxied through the desktop, so Bilibili/YouTube search works exactly like on desktop. The phone only stores what it plays; nothing is uploaded anywhere.
 
 ---
 

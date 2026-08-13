@@ -9,6 +9,7 @@
     "dev:web": "vite --config vite.config.web.ts",
     "build": "tsc && vite build",
     "build:web": "vite build --config vite.config.web.ts",
+    "deploy:web": "npm run build:web && node scripts/deploy-web.mjs",
     "preview": "vite preview",
     "preview:web": "vite preview --config vite.config.web.ts --port 3000",
     "tauri": "tauri"

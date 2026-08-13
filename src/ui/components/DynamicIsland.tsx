@@ -24,7 +24,7 @@ const DynamicIsland: React.FC<DynamicIslandProps> = ({ player, nextTrack }) => {
   const islandRef = useRef<HTMLDivElement>(null);
   const db = DatabaseManager.getInstance();
 
-  // Load saved position and visibility
+  // Load saved position, visibility, and style
   useEffect(() => {
     (async () => {
       const enabled = await db.getSetting("dynIslandEnabled");
@@ -32,6 +32,17 @@ const DynamicIsland: React.FC<DynamicIslandProps> = ({ player, nextTrack }) => {
       const sx = await db.getSetting("dynIslandX");
       const sy = await db.getSetting("dynIslandY");
       if (sx && sy) setPos({ x: Number(sx), y: Number(sy) });
+      // Apply saved style so the embedded island never shows stale defaults
+      // (previously it could require an app restart).
+      const h = document.documentElement;
+      const color = await db.getSetting("dynIslandColor");
+      if (color) h.style.setProperty("--dyn-island-bg", color);
+      const blur = await db.getSetting("dynIslandBlur");
+      if (blur) h.style.setProperty("--dyn-island-blur", `${blur}px`);
+      const opacity = await db.getSetting("dynIslandOpacity");
+      if (opacity) h.style.setProperty("--dyn-island-opacity", `${Number(opacity) / 100}`);
+      const size = await db.getSetting("dynIslandSize");
+      if (size) h.style.setProperty("--dyn-island-width", `${size}px`);
     })();
   }, [db]);
 

@@ -140,24 +140,61 @@ const DynamicIslandWindow: React.FC = () => {
     return () => { /* cleanup via window close */ };
   }, []);
 
-  // ── Listen for style updates ──
+  // ── Apply style settings instantly ──
+  // The main window emits `island-style` whenever a Dynamic Island setting
+  // changes, so the island updates immediately instead of on a polling loop
+  // (this was the "must restart the app to see the new style" bug).
   useEffect(() => {
-    const interval = setInterval(async () => {
+    let disposed = false;
+    let unlistenFn: (() => void) | null = null;
+
+    const apply = (s: Partial<{ color: string; blur: number; opacity: number; size: number; accent: string }>) => {
+      const h = document.documentElement;
+      if (s.color) h.style.setProperty("--dyn-island-bg", s.color);
+      if (typeof s.blur === "number") h.style.setProperty("--dyn-island-blur", `${s.blur}px`);
+      if (typeof s.opacity === "number") h.style.setProperty("--dyn-island-opacity", `${s.opacity / 100}`);
+      if (typeof s.size === "number") h.style.setProperty("--dyn-island-width", `${s.size}px`);
+      if (s.accent) h.style.setProperty("--accent-primary", s.accent);
+    };
+
+    (async () => {
+      // Initial load from the database (covers app start / window re-open).
       const db = DatabaseManager.getInstance();
       const color = await db.getSetting("dynIslandColor");
-      if (color) document.documentElement.style.setProperty("--dyn-island-bg", color);
       const blur = await db.getSetting("dynIslandBlur");
-      if (blur) document.documentElement.style.setProperty("--dyn-island-blur", `${blur}px`);
       const opacity = await db.getSetting("dynIslandOpacity");
-      if (opacity) document.documentElement.style.setProperty("--dyn-island-opacity", `${Number(opacity) / 100}`);
       const size = await db.getSetting("dynIslandSize");
-      if (size) document.documentElement.style.setProperty("--dyn-island-width", `${size}px`);
       const acc = await db.getSetting("themeAccent");
-      if (acc) { document.documentElement.style.setProperty("--accent-primary", acc); }
       const lyrics = await db.getSetting("dynIslandLyrics");
+      if (disposed) return;
+      apply({
+        color: color ?? undefined,
+        blur: blur ? Number(blur) : undefined,
+        opacity: opacity ? Number(opacity) : undefined,
+        size: size ? Number(size) : undefined,
+        accent: acc ?? undefined,
+      });
       setLyricsEnabled(lyrics === "true");
-    }, 3000);
-    return () => clearInterval(interval);
+
+      // Live updates from Settings.
+      const { listen } = await import("@tauri-apps/api/event");
+      if (disposed) return;
+      unlistenFn = await listen<{ color: string; blur: number; opacity: number; size: number; accent: string }>("island-style", async (event) => {
+        apply(event.payload);
+        if (event.payload.size) {
+          // Keep the native window sized to the new island width.
+          try {
+            const { invoke } = await import("@tauri-apps/api/core");
+            void invoke("set_island_size", { width: event.payload.size });
+          } catch { /* ignore */ }
+        }
+      });
+    })();
+
+    return () => {
+      disposed = true;
+      unlistenFn?.();
+    };
   }, []);
 
   // ── Native window dragging ──

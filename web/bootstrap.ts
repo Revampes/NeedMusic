@@ -4,7 +4,7 @@
  */
 
 import { PlaybackEngine, PlaybackState, RepeatMode } from "@core/services/PlaybackEngine";
-import { WebAudioPlayer } from "@core/services/WebAudioPlayer";
+import { HtmlAudioPlayer } from "@core/services/HtmlAudioPlayer";
 
 export { PlaybackEngine, PlaybackState, RepeatMode };
 
@@ -15,8 +15,13 @@ export { PlaybackEngine, PlaybackState, RepeatMode };
 class WebTrackStore {
   private tracks: TrackData[] = [];
 
+  /** Upsert: adds the track, or REPLACES an existing one with the same id
+   *  (so re-syncing refreshes audioUrl after the LAN token rotates). */
   addTrack(t: TrackData): void {
-    if (!this.tracks.find((x) => x.id === t.id)) {
+    const idx = this.tracks.findIndex((x) => x.id === t.id);
+    if (idx >= 0) {
+      this.tracks[idx] = t;
+    } else {
       this.tracks.push(t);
     }
   }
@@ -69,12 +74,15 @@ export const webTrackStore = new WebTrackStore();
 
 /**
  * Initialize the web player. Call once at startup.
+ *
+ * NOTE: do NOT reset the singleton here. The web app grabs the engine via
+ * `PlaybackEngine.getInstance()` during render; resetting it here would
+ * destroy that instance (leaving it with no audio output) and create a new
+ * one that nothing else references — playback would silently do nothing.
  */
 export function initWebPlayer(): PlaybackEngine {
-  const engine = PlaybackEngine.resetInstance
-    ? (PlaybackEngine.resetInstance(), PlaybackEngine.getInstance())
-    : PlaybackEngine.getInstance();
-  engine.setAudioOutput(new WebAudioPlayer());
+  const engine = PlaybackEngine.getInstance();
+  engine.setAudioOutput(new HtmlAudioPlayer());
   return engine;
 }
 

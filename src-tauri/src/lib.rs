@@ -13,6 +13,7 @@ mod audio_eq;
 mod discord_rpc;
 mod online;
 mod lan_server;
+mod updater;
 
 pub use scanner::LibraryScanner;
 pub use concurrency::ConcurrencyGate;
@@ -20,7 +21,7 @@ pub use audio::NativeAudioPlayer;
 pub use audio_eq::{Equalizer, EqBand, EqPreset, EQ_PRESETS};
 pub use discord_rpc::DiscordRpcManager;
 pub use online::{OnlineTrackResult, OnlineSearchResult, CombinedSearchResult};
-pub use lan_server::{LanServer, LanTrack};
+pub use lan_server::{LanServer, LanTrack, LanPlaylist};
 
 pub struct AppState {
     pub scanner: Mutex<LibraryScanner>,
@@ -415,6 +416,16 @@ async fn set_island_always_on_top(
     Ok(())
 }
 
+/// Resize the Dynamic Island native window to fit a new island width, so size
+/// changes apply instantly (no restart needed). Height stays fixed at 200.
+#[tauri::command]
+async fn set_island_size(width: f64, app: tauri::AppHandle) -> Result<(), String> {
+    if let Some(w) = app.get_webview_window("dynamic-island") {
+        let _ = w.set_size(tauri::Size::Logical(tauri::LogicalSize::new(width + 8.0, 200.0)));
+    }
+    Ok(())
+}
+
 // ─── Discord Rich Presence Commands ──────────────────
 
 #[tauri::command]
@@ -522,25 +533,54 @@ async fn write_track_metadata(
 
 // ─── Default Download Directory ──────────────────────────
 
-/// Returns the user's Desktop\Music folder as the default download location
-/// for online music (Bilibili, YouTube). Falls back to %APPDATA%/NeedMusic/Music.
+/// Returns the user's Music\NeedMusic folder as the default download location
+/// for online music (Bilibili, YouTube). Falls back to Desktop\Music.
 #[tauri::command]
-fn get_default_download_dir() -> Result<String, String> {
-    // Try Desktop\Music first.
+fn get_default_download_dir() -> Result<String, String> {    // Try Music\NeedMusic first.
     if let Ok(userprofile) = std::env::var("USERPROFILE") {
-        let music_path = std::path::PathBuf::from(&userprofile).join("Desktop").join("Music");
+        let music_path = std::path::PathBuf::from(&userprofile)
+            .join("Music")
+            .join("NeedMusic");
         return Ok(music_path.to_string_lossy().to_string());
     }
-    // Fallback to APPDATA.
-    if let Ok(appdata) = std::env::var("APPDATA") {
-        let fallback = std::path::PathBuf::from(&appdata).join("NeedMusic").join("Music");
+    // Fallback to Desktop\Music.
+    if let Ok(userprofile) = std::env::var("USERPROFILE") {
+        let fallback = std::path::PathBuf::from(&userprofile).join("Desktop").join("Music");
         return Ok(fallback.to_string_lossy().to_string());
     }
     Err("Cannot determine default download directory".to_string())
 }
 
-// ─── Online / Bilibili & YouTube Commands ────────────────
+/// Convert saved online audio files (m4a/mp4/webm/opus/…) in a folder to MP3,
+/// removing the originals. Returns old→new paths so the frontend can remap
+/// the library database.
+#[tauri::command]
+async fn convert_saved_audio_to_mp3(
+    dir: String,
+) -> Result<online::ConvertFolderResult, String> {
+    let d = dir.clone();
+    tokio::task::spawn_blocking(move || online::convert_saved_audio_to_mp3(&d))
+        .await
+        .map_err(|e| format!("Conversion task panicked: {}", e))?
+}
 
+/// Kick off ffmpeg auto-install in the background (fire-and-forget), so it is
+/// ready before the user first needs to convert/download a track.
+#[tauri::command]
+fn ensure_ffmpeg_installed() {
+    std::thread::spawn(|| {
+        let _ = online::ensure_ffmpeg();
+    });
+}
+
+/// Batch file-existence check (used to reconcile the library after MP3
+/// conversion deletes the originals).
+#[tauri::command]
+fn files_exist(paths: Vec<String>) -> Vec<bool> {
+    paths.iter().map(|p| std::path::Path::new(p).exists()).collect()
+}
+
+// ─── Online / Bilibili & YouTube Commands ────────────────
 /// Fetch LRC lyrics for an online track. Only Bilibili currently exposes
 /// lyrics through its public API; YouTube returns an error (no lyrics).
 #[tauri::command]
@@ -584,6 +624,53 @@ async fn lan_set_library(
 ) -> Result<(), String> {
     state.lan_server.set_library(tracks);
     Ok(())
+}
+
+/// Push the desktop's playlists + favorite ids to the LAN server so the mobile
+/// web app can restore the same playlists and hearts.
+#[tauri::command]
+async fn lan_set_playlists(
+    playlists: Vec<LanPlaylist>,
+    favorite_ids: Vec<String>,
+    state: State<'_, AppState>,
+) -> Result<(), String> {
+    state.lan_server.set_playlists(playlists, favorite_ids);
+    Ok(())
+}
+
+// ─── Track File Deletion ────────────────────────────
+
+/// Permanently delete a track's audio file from disk.
+/// Online/virtual tracks (bilibili://, youtube://) have no real file and are
+/// a no-op — the DB row removal is handled by the frontend.
+#[tauri::command]
+async fn delete_track_file(file_path: String) -> Result<(), String> {
+    if file_path.starts_with("bilibili://") || file_path.starts_with("youtube://") {
+        return Ok(());
+    }
+    let path = std::path::Path::new(&file_path);
+    match std::fs::metadata(path) {
+        Ok(_) => std::fs::remove_file(path).map_err(|e| format!("Failed to delete file: {}", e)),
+        Err(_) => Ok(()), // already gone — nothing to do
+    }
+}
+
+// ─── Update Commands ────────────────────────────────
+/// Check GitHub Releases for a newer version of NeedMusic.
+#[tauri::command]
+async fn check_for_update(app: tauri::AppHandle) -> Result<updater::UpdateInfo, String> {
+    let current = app.package_info().version.to_string();
+    tokio::task::spawn_blocking(move || updater::check_for_update(&current))
+        .await
+        .map_err(|e| format!("Update check panicked: {}", e))?
+}
+
+/// Download the latest installer to a temp folder; returns the local path.
+#[tauri::command]
+async fn download_update(url: String) -> Result<String, String> {
+    tokio::task::spawn_blocking(move || updater::download_update(&url))
+        .await
+        .map_err(|e| format!("Update download panicked: {}", e))?
 }
 
 #[tauri::command]
@@ -1080,6 +1167,7 @@ pub fn run() {
             set_window_blur,
             toggle_dynamic_island,
             set_island_always_on_top,
+            set_island_size,
             play_audio,
             pause_audio,
             resume_audio,
@@ -1103,6 +1191,9 @@ pub fn run() {
             get_online_lyrics,
             download_online_audio,
             get_default_download_dir,
+            convert_saved_audio_to_mp3,
+            ensure_ffmpeg_installed,
+            files_exist,
             is_ytdlp_available,
             proxy_image,
             get_online_cache_info,
@@ -1111,6 +1202,10 @@ pub fn run() {
             lan_server_stop,
             lan_server_url,
             lan_set_library,
+            lan_set_playlists,
+            check_for_update,
+            download_update,
+            delete_track_file,
             set_eq_enabled,
             set_eq_band_gain,
             get_eq_state,

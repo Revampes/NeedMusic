@@ -60,6 +60,9 @@ const SettingsView: React.FC<Props> = ({ onTracksLoaded }) => {
   const [lanUrl, setLanUrl] = useState("");
   const [lanBusy, setLanBusy] = useState(false);
   const [lanError, setLanError] = useState<string | null>(null);
+  // Convert saved audio to MP3
+  const [convertBusy, setConvertBusy] = useState(false);
+  const [convertResult, setConvertResult] = useState<{ type: "success" | "error"; text: string } | null>(null);
   const bgImageInputRef = useRef<HTMLInputElement>(null);
   const db = DatabaseManager.getInstance();
 
@@ -161,6 +164,33 @@ const SettingsView: React.FC<Props> = ({ onTracksLoaded }) => {
     applyAllStyles(s);
   };
 
+  /**
+   * Push a Dynamic Island style change everywhere at once:
+   *  1. the embedded island in this window (CSS vars are already set by the
+   *     control's onChange, this just refreshes its enabled state),
+   *  2. the separate Dynamic Island window (via a Tauri event → applies
+   *     instantly instead of waiting for its old polling loop),
+   *  3. the native window size when the width slider moves.
+   * This removes the "must restart the app to see the new style" behaviour.
+   */
+  const notifyIslandStyle = useCallback(async (patch?: Partial<Settings>) => {
+    const s = { ...settings, ...(patch || {}) };
+    window.dispatchEvent(new CustomEvent("dynIslandRefresh"));
+    try {
+      const { emit } = await import("@tauri-apps/api/event");
+      await emit("island-style", {
+        color: s.dynIslandColor,
+        blur: Number(s.dynIslandBlur || 0),
+        opacity: Number(s.dynIslandOpacity || 100),
+        size: Number(s.dynIslandSize || 300),
+        accent: s.themeAccent,
+      });
+    } catch { /* island window may be closed — style lands on next open */ }
+    if (patch?.dynIslandSize) {
+      try { await invoke("set_island_size", { width: Number(s.dynIslandSize) }); } catch { /* no window */ }
+    }
+  }, [settings]);
+
   const handleBgImagePick = () => {
     bgImageInputRef.current?.click();
   };
@@ -209,6 +239,58 @@ const SettingsView: React.FC<Props> = ({ onTracksLoaded }) => {
     setScanning(false);
   }, [onTracksLoaded]);
 
+  const handleConvertToMp3 = useCallback(async () => {
+    setConvertBusy(true);
+    setConvertResult(null);
+    try {
+      const dir = (downloadPath || await invoke<string>("get_default_download_dir")).trim();
+      if (!dir) throw new Error("No download folder configured.");
+      const res = await invoke<{ converted: { old_path: string; new_path: string }[]; errors: string[] }>("convert_saved_audio_to_mp3", { dir });
+
+      // 1. Remap each converted file in the DB (FK-safe; survive per-file errors).
+      const db = DatabaseManager.getInstance();
+      const remapErrors: string[] = [];
+      for (const c of res.converted) {
+        try {
+          await db.remapTrackFile(c.old_path, c.new_path);
+        } catch (e) {
+          remapErrors.push(`${c.old_path}: ${e}`);
+        }
+      }
+
+      // 2. Reconcile the library with the filesystem: remove ANY track whose
+      //    file no longer exists (the .m4a originals are gone after
+      //    conversion), then scan the folder so every new .mp3 is added.
+      //    This also repairs libraries left stale by an earlier failed run.
+      const allTracks = LibraryManager.getInstance().getAllTracks();
+      let removedMsg = "";
+      if (allTracks.length > 0) {
+        const exists = await invoke<boolean[]>("files_exist", { paths: allTracks.map((t) => t.filePath) });
+        let removed = 0;
+        for (let i = 0; i < allTracks.length; i++) {
+          if (!exists[i]) {
+            await LibraryManager.getInstance().removeTrack(allTracks[i].id);
+            removed++;
+          }
+        }
+        if (removed > 0) {
+          removedMsg = ` Removed ${removed} broken track(s) whose files were missing.`;
+        }
+      }
+      await LibraryManager.getInstance().scanDirectory(dir);
+      await LibraryManager.getInstance().reload();
+      onTracksLoaded(LibraryManager.getInstance().getAllTracks());
+
+      const errText = [...res.errors, ...remapErrors];
+      const errMsg = errText.length > 0 ? ` — ${errText.length} failed: ${errText.slice(0, 3).join("; ")}` : "";
+      setConvertResult({ type: "success", text: `Converted ${res.converted.length} file(s) to MP3 in ${dir}${errMsg}${removedMsg}` });
+    } catch (e) {
+      setConvertResult({ type: "error", text: String(e) });
+    } finally {
+      setConvertBusy(false);
+    }
+  }, [downloadPath, onTracksLoaded]);
+
   const styleVal = settings.backgroundStyle || "dark";
 
   return (
@@ -252,7 +334,7 @@ const SettingsView: React.FC<Props> = ({ onTracksLoaded }) => {
         {/* ── Glass mode opacity ── */}
         {styleVal === "glass" && (
           <label className="settings-row"><span>Opacity</span>
-            <input className="settings-input short" type="range" min="0" max="100" step="1" value={settings.panelOpacity} onChange={e => {
+            <input className="settings-input range" type="range" min="0" max="100" step="1" value={settings.panelOpacity} onChange={e => {
               save("panelOpacity", e.target.value);
               const val = Math.round(Number(e.target.value) / 10) * 10;
               const h = document.documentElement;
@@ -294,14 +376,14 @@ const SettingsView: React.FC<Props> = ({ onTracksLoaded }) => {
               }} style={{ width:32, height:28, border:"none", borderRadius:4, cursor:"pointer" }} />
             </label>
             <label className="settings-row"><span>Blur</span>
-              <input className="settings-input short" type="range" min="0" max="40" step="1" value={settings.customBgBlur} onChange={e => {
+              <input className="settings-input range" type="range" min="0" max="40" step="1" value={settings.customBgBlur} onChange={e => {
                 save("customBgBlur", e.target.value);
                 document.documentElement.style.setProperty("--custom-bg-blur", `${e.target.value}px`);
               }} />
               <span style={{ fontSize:11, color:"var(--text-tertiary)", width:28 }}>{settings.customBgBlur}px</span>
             </label>
             <label className="settings-row"><span>Intensity</span>
-              <input className="settings-input short" type="range" min="10" max="100" step="1" value={settings.customBgIntensity} onChange={e => {
+              <input className="settings-input range" type="range" min="10" max="100" step="1" value={settings.customBgIntensity} onChange={e => {
                 save("customBgIntensity", e.target.value);
                 document.documentElement.style.setProperty("--custom-bg-intensity", `${Number(e.target.value) / 100}`);
               }} />
@@ -330,7 +412,7 @@ const SettingsView: React.FC<Props> = ({ onTracksLoaded }) => {
         )}
 
         <label className="settings-row"><span>Accent</span>
-          <input type="color" value={settings.themeAccent} onChange={e => { save("themeAccent", e.target.value); document.documentElement.style.setProperty("--accent-primary", e.target.value); }} style={{ width:32, height:28, border:"none", borderRadius:4, cursor:"pointer" }} />
+          <input type="color" value={settings.themeAccent} onChange={e => { save("themeAccent", e.target.value); document.documentElement.style.setProperty("--accent-primary", e.target.value); notifyIslandStyle({ themeAccent: e.target.value }); }} style={{ width:32, height:28, border:"none", borderRadius:4, cursor:"pointer" }} />
         </label>
       </section>
 
@@ -342,6 +424,7 @@ const SettingsView: React.FC<Props> = ({ onTracksLoaded }) => {
             await save("dynIslandEnabled", val);
             const alwaysOnTop = settings.dynIslandAlwaysOnTop === "true";
             await invoke("toggle_dynamic_island", { enable: e.target.checked, alwaysOnTop });
+            notifyIslandStyle();
           }} />
           Enable Dynamic Island <span style={{ fontSize:10, color:"var(--text-tertiary)", marginLeft:4 }}>(separate floating window)</span>
         </label>
@@ -359,33 +442,38 @@ const SettingsView: React.FC<Props> = ({ onTracksLoaded }) => {
               <input type="color" value={settings.dynIslandColor} onChange={e => {
                 save("dynIslandColor", e.target.value);
                 document.documentElement.style.setProperty("--dyn-island-bg", e.target.value);
+                notifyIslandStyle({ dynIslandColor: e.target.value });
               }} style={{ width:32, height:28, border:"none", borderRadius:4, cursor:"pointer" }} />
             </label>
             <label className="settings-row"><span>Blur</span>
-              <input className="settings-input short" type="range" min="0" max="60" step="1" value={settings.dynIslandBlur} onChange={e => {
+              <input className="settings-input range" type="range" min="0" max="60" step="1" value={settings.dynIslandBlur} onChange={e => {
                 save("dynIslandBlur", e.target.value);
                 document.documentElement.style.setProperty("--dyn-island-blur", `${e.target.value}px`);
+                notifyIslandStyle({ dynIslandBlur: e.target.value });
               }} />
-              <span style={{ fontSize:11, color:"var(--text-tertiary)", width:28 }}>{settings.dynIslandBlur}px</span>
+              <span style={{ fontSize:11, color:"var(--text-tertiary)", width:32, flexShrink:0 }}>{settings.dynIslandBlur}px</span>
             </label>
             <label className="settings-row"><span>Opacity</span>
-              <input className="settings-input short" type="range" min="20" max="100" step="1" value={settings.dynIslandOpacity} onChange={e => {
+              <input className="settings-input range" type="range" min="20" max="100" step="1" value={settings.dynIslandOpacity} onChange={e => {
                 save("dynIslandOpacity", e.target.value);
                 document.documentElement.style.setProperty("--dyn-island-opacity", `${Number(e.target.value) / 100}`);
+                notifyIslandStyle({ dynIslandOpacity: e.target.value });
               }} />
-              <span style={{ fontSize:11, color:"var(--text-tertiary)", width:28 }}>{settings.dynIslandOpacity}%</span>
+              <span style={{ fontSize:11, color:"var(--text-tertiary)", width:32, flexShrink:0 }}>{settings.dynIslandOpacity}%</span>
             </label>
             <label className="settings-row"><span>Size (width)</span>
-              <input className="settings-input short" type="range" min="240" max="480" step="10" value={settings.dynIslandSize} onChange={e => {
+              <input className="settings-input range" type="range" min="160" max="640" step="10" value={settings.dynIslandSize} onChange={e => {
                 save("dynIslandSize", e.target.value);
                 document.documentElement.style.setProperty("--dyn-island-width", `${e.target.value}px`);
+                notifyIslandStyle({ dynIslandSize: e.target.value });
               }} />
-              <span style={{ fontSize:11, color:"var(--text-tertiary)", width:32 }}>{settings.dynIslandSize}px</span>
+              <span style={{ fontSize:11, color:"var(--text-tertiary)", width:32, flexShrink:0 }}>{settings.dynIslandSize}px</span>
             </label>
             <label className="settings-check">
               <input type="checkbox" checked={settings.dynIslandLyrics === "true"} onChange={async e => {
                 const val = e.target.checked ? "true" : "false";
                 await save("dynIslandLyrics", val);
+                notifyIslandStyle();
               }} />
               Show lyrics <span style={{ fontSize:10, color:"var(--text-tertiary)", marginLeft:4 }}>(when the track has lyrics)</span>
             </label>
@@ -396,9 +484,10 @@ const SettingsView: React.FC<Props> = ({ onTracksLoaded }) => {
       {/* ── LAN Sync (experimental) ── */}
       <section><h3><IconSettings size={16} style={{ marginRight: 6 }} />LAN Sync <span style={{ fontSize:10, color:"var(--text-tertiary)", fontWeight:400 }}>(experimental)</span></h3>
         <p style={{ fontSize:12, color:"var(--text-tertiary)", marginBottom:10, lineHeight:1.5 }}>
-          Share your library with the web app on your phone (same Wi-Fi, e.g. Safari on iPhone).
-          Start the server, then open the shown address on the phone — it streams tracks straight from this computer.
-          No authentication; only use on trusted networks.
+          Share your library with the web player on your phone (same Wi-Fi, e.g. Safari on iPhone).
+          Start the server, then open the shown address on the phone — it loads the web player
+          from this computer and streams tracks straight from your library. The address contains a
+          security token; only use on trusted networks.
         </p>
         {lanUrl && (
           <div style={{ marginBottom:10 }}>
@@ -527,6 +616,22 @@ const SettingsView: React.FC<Props> = ({ onTracksLoaded }) => {
         </div>
         <div style={{ fontSize: 10, color: "var(--text-tertiary)", marginBottom: 12 }}>
           Downloaded music from Bilibili & YouTube is saved here. Separate from your import folder.
+          MP3 conversion needs ffmpeg — it is downloaded automatically on first use (~80 MB, may take a minute).
+        </div>
+        <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 12 }}>
+          <button
+            className="settings-btn"
+            style={{ fontSize: 11 }}
+            onClick={handleConvertToMp3}
+            disabled={convertBusy}
+          >
+            {convertBusy ? "Converting…" : "Convert saved music to MP3"}
+          </button>
+          {convertResult && (
+            <span style={{ fontSize: 12, color: convertResult.type === "success" ? "var(--color-success)" : "var(--color-error)" }}>
+              {convertResult.text}
+            </span>
+          )}
         </div>
 
         <label className="settings-check">

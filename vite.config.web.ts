@@ -5,7 +5,9 @@ import path from "path";
 export default defineConfig({
   plugins: [react()],
   root: path.resolve(__dirname, "web"),
-  base: "/NeedMusic/",
+  // Relative base: the built app works from any root — GitHub Pages
+  // (/NeedMusic/) or the desktop LAN server (http://ip:17963/).
+  base: "./",
   resolve: {
     alias: {
       "@core": path.resolve(__dirname, "src/core"),

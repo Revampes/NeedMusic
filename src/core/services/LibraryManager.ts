@@ -88,6 +88,18 @@ export class LibraryManager {
     }
   }
 
+  /**
+   * Re-read the whole library from the database, clearing the in-memory map.
+   * Used after file paths change (e.g. .m4a → .mp3 conversion).
+   */
+  async reload(): Promise<void> {
+    this.tracks.clear();
+    const tracks = await this.dbManager.getAllTracks();
+    for (const track of tracks) {
+      this.tracks.set(track.id, track);
+    }
+  }
+
   // ─── Scanning ───────────────────────────────────────────────
 
   /**

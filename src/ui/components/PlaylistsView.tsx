@@ -11,13 +11,15 @@ interface SavedPlaylist {
 
 interface PlaylistsViewProps {
   tracks: Track[];
+  /** Called after any playlist mutation (create/delete/add) so the parent can re-sync the LAN server. */
+  onChanged?: () => void;
 }
 
 /**
  * PlaylistsView — shows saved playlists, allows creating new ones,
  * and viewing/deleting existing playlists.
  */
-const PlaylistsView: React.FC<PlaylistsViewProps> = ({ tracks }) => {
+const PlaylistsView: React.FC<PlaylistsViewProps> = ({ tracks, onChanged }) => {
   const [playlists, setPlaylists] = useState<SavedPlaylist[]>([]);
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [playlistTracks, setPlaylistTracks] = useState<Track[]>([]);
@@ -40,7 +42,8 @@ const PlaylistsView: React.FC<PlaylistsViewProps> = ({ tracks }) => {
     setNewName("");
     setShowCreate(false);
     loadPlaylists();
-  }, [newName, db, loadPlaylists]);
+    onChanged?.();
+  }, [newName, db, loadPlaylists, onChanged]);
 
   const handleSelect = useCallback(async (id: string) => {
     setSelectedId(id);
@@ -52,14 +55,16 @@ const PlaylistsView: React.FC<PlaylistsViewProps> = ({ tracks }) => {
     await db.deletePlaylist(id);
     if (selectedId === id) { setSelectedId(null); setPlaylistTracks([]); }
     loadPlaylists();
-  }, [db, selectedId, loadPlaylists]);
+    onChanged?.();
+  }, [db, selectedId, loadPlaylists, onChanged]);
 
   const handleAddTrack = useCallback(async (track: Track) => {
     if (!selectedId) return;
     await db.addTrackToPlaylist(selectedId, track.id);
     const pts = await db.getPlaylistTracks(selectedId);
     setPlaylistTracks(pts);
-  }, [db, selectedId]);
+    onChanged?.();
+  }, [db, selectedId, onChanged]);
 
   const handlePlayAll = useCallback(() => {
     if (playlistTracks.length === 0) return;

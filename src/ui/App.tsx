@@ -27,15 +27,45 @@ import {
   IconMusic, IconImage, IconPrevious, IconPlay, IconPause, IconNext, IconStop,
   IconRepeatOff, IconRepeat, IconRepeatOne, IconShuffle, IconVolume,
   IconClock, IconPlus, IconDisc, IconMic, IconGlobe, IconClose, IconHome,
+  IconAlert,
   IconLyrics,
 } from "@ui/components/Icons";
 import SplashScreen from "@ui/components/SplashScreen";
 import HomeView from "@ui/components/HomeView";
+import UpdaterBanner from "@ui/components/UpdaterBanner";
+import ConfirmDialog from "@ui/components/ConfirmDialog";
 import "./styles/design-tokens.css";
 import "./styles/global.css";
 
 const SPEED_OPTIONS = [0.5, 0.75, 1.0, 1.25, 1.5, 2.0];
 const FILTERS = ["All", "Title", "Artist", "Album", "Genre"];
+const SORT_OPTIONS = [
+  { value: "default", label: "Default order" },
+  { value: "title-az", label: "Title A–Z" },
+  { value: "title-za", label: "Title Z–A" },
+  { value: "artist-az", label: "Artist A–Z" },
+  { value: "album-az", label: "Album A–Z" },
+  { value: "duration-asc", label: "Duration (shortest)" },
+  { value: "duration-desc", label: "Duration (longest)" },
+  { value: "date-new", label: "Date added (newest)" },
+];
+
+/** Apply a sort mode to a track list (stable for "default"). */
+function sortTracks<T extends { title: string; artist: string; album: string; durationSecs: number; dateAdded: Date | string }>(list: T[], mode: string): T[] {
+  if (!mode || mode === "default") return list;
+  const arr = [...list];
+  const cmp = (a: string, b: string) => a.localeCompare(b, undefined, { sensitivity: "base" });
+  switch (mode) {
+    case "title-az": return arr.sort((a, b) => cmp(a.title, b.title) || cmp(a.artist, b.artist));
+    case "title-za": return arr.sort((a, b) => cmp(b.title, a.title) || cmp(a.artist, b.artist));
+    case "artist-az": return arr.sort((a, b) => cmp(a.artist, b.artist) || cmp(a.title, b.title));
+    case "album-az": return arr.sort((a, b) => cmp(a.album, b.album) || cmp(a.title, b.title));
+    case "duration-asc": return arr.sort((a, b) => (a.durationSecs || 0) - (b.durationSecs || 0));
+    case "duration-desc": return arr.sort((a, b) => (b.durationSecs || 0) - (a.durationSecs || 0));
+    case "date-new": return arr.sort((a, b) => new Date(b.dateAdded).getTime() - new Date(a.dateAdded).getTime());
+    default: return list;
+  }
+}
 
 const App: React.FC = () => {
   // v2 — Splash animation + Home page
@@ -48,11 +78,17 @@ const App: React.FC = () => {
   const [activeTab, setActiveTab] = useState("Home");
   const [searchQuery, setSearchQuery] = useState("");
   const [filterField, setFilterField] = useState("All");
+  const [sortMode, setSortMode] = useState("default");
   const [queueVersion, setQueueVersion] = useState(0); // bumped on every queue mutation
+  const [playlistVersion, setPlaylistVersion] = useState(0); // bumped when playlists/favorites change
   // Lyrics: fetched for the current track when it is a Bilibili online track.
   const [showLyrics, setShowLyrics] = useState(false);
   const [lyricsLines, setLyricsLines] = useState<LyricLine[] | null>(null);
   const [lyricsLoading, setLyricsLoading] = useState(false);
+  // Track awaiting a delete confirmation.
+  const [pendingDelete, setPendingDelete] = useState<Track | null>(null);
+  // Playback failure banner (e.g. a converted track whose file is missing).
+  const [playError, setPlayError] = useState<string | null>(null);
   const [player, setPlayer] = useState<PlayerState>({
     currentTrack: null, playbackState: PlaybackState.Idle,
     currentTimeSecs: 0, durationSecs: 0, volume: 1, playbackRate: 1,
@@ -77,6 +113,9 @@ const App: React.FC = () => {
       if (timedOut) return;
       console.log("[NeedMusic] Bootstrap OK, starting MediaControlBridge...");
       await MediaControlBridge.getInstance().start();
+
+      // Pre-install ffmpeg in the background (MP3 conversion dependency).
+      invoke("ensure_ffmpeg_installed").catch(() => {});
 
       const db = DatabaseManager.getInstance();
       // ── Restore appearance settings ──
@@ -410,7 +449,7 @@ const App: React.FC = () => {
       .finally(() => setLyricsLoading(false));
   }, [player.currentTrack?.id]);
 
-  // ── LAN Sync (experimental): keep the LAN server's library in sync ──
+  // ── LAN Sync (experimental): keep the LAN server's library AND playlists in sync ──
   useEffect(() => {
     invoke("lan_set_library", {
       tracks: tracks.map((t) => ({
@@ -421,26 +460,53 @@ const App: React.FC = () => {
         filePath: t.filePath,
         durationSecs: t.durationSecs,
       })),
-    }).catch(() => { /* server may not be running — non-fatal */ });
-  }, [tracks]);
+    }).catch((e) => console.warn("[NeedMusic] LAN library sync failed:", e));
+
+    // Playlists + favorites live in SQLite; push them so the phone sees the
+    // same playlists and hearts as the desktop.
+    (async () => {
+      const db = DatabaseManager.getInstance();
+      try {
+        const playlists = await db.getAllPlaylists();
+        const entries: { id: string; name: string; trackIds: string[] }[] = [];
+        for (const pl of playlists) {
+          const pts = await db.getPlaylistTracks(pl.id);
+          entries.push({ id: pl.id, name: pl.name, trackIds: pts.map((t) => t.id) });
+        }
+        await invoke("lan_set_playlists", {
+          playlists: entries,
+          favoriteIds: tracks.filter((t) => t.isFavorite).map((t) => t.id),
+        });
+      } catch { /* DB/commands unavailable — non-fatal */ }
+    })();
+  }, [tracks, playlistVersion]);
 
   const filteredTracks = useMemo(() => {
     let list = tracks;
-    if (!searchQuery.trim()) return list;
-    const q = searchQuery.toLowerCase();
-    return list.filter((t) => {
-      switch (filterField) {
-        case "Title": return t.title.toLowerCase().includes(q);
-        case "Artist": return t.artist.toLowerCase().includes(q);
-        case "Album": return t.album.toLowerCase().includes(q);
-        case "Genre": return t.genre.toLowerCase().includes(q);
-        default: return t.title.toLowerCase().includes(q) || t.artist.toLowerCase().includes(q) || t.album.toLowerCase().includes(q);
-      }
-    });
-  }, [tracks, searchQuery, filterField]);
+    if (searchQuery.trim()) {
+      const q = searchQuery.toLowerCase();
+      list = tracks.filter((t) => {
+        switch (filterField) {
+          case "Title": return t.title.toLowerCase().includes(q);
+          case "Artist": return t.artist.toLowerCase().includes(q);
+          case "Album": return t.album.toLowerCase().includes(q);
+          case "Genre": return t.genre.toLowerCase().includes(q);
+          default: return t.title.toLowerCase().includes(q) || t.artist.toLowerCase().includes(q) || t.album.toLowerCase().includes(q);
+        }
+      });
+    }
+    return sortTracks(list, sortMode);
+  }, [tracks, searchQuery, filterField, sortMode]);
 
   const handlePlayTrack = useCallback(async (track: Track) => {
-    await engine.play(track);
+    setPlayError(null);
+    try {
+      await engine.play(track);
+    } catch (e: any) {
+      // Show why playback failed AND the exact path it tried to open, so a
+      // stale .m4a entry vs. a wrong .mp3 path is immediately visible.
+      setPlayError(`Couldn't play "${track.title}": ${(e && e.message) || e}\nFile: ${track.filePath}`);
+    }
   }, [engine]);
 
   const handleToggleFavorite = useCallback(async (track: Track, force?: boolean) => {
@@ -448,16 +514,37 @@ const App: React.FC = () => {
     track.isFavorite = next;
     await DatabaseManager.getInstance().setFavorite(track.id, next);
     setTracks([...tracks]);
+    setPlaylistVersion((v) => v + 1); // favorites playlist changed → re-sync LAN
     if (player.currentTrack?.id === track.id) setPlayer((p) => ({ ...p, isFavorite: next }));
   }, [tracks, player.currentTrack]);
 
-  const handleRemoveTrack = useCallback(async (track: Track) => {
+  const handleRemoveTrack = useCallback((track: Track) => {
+    // Ask for confirmation before permanently deleting anything.
+    setPendingDelete(track);
+  }, []);
+
+  const confirmDeleteTrack = useCallback(async (track: Track) => {
     // If currently playing this track, stop playback first.
     if (player.currentTrack?.id === track.id) {
       engine.stop();
     }
+    const db = DatabaseManager.getInstance();
+    // Remove from Favorites (also cleans the ★ Favorites playlist row).
+    if (track.isFavorite) {
+      await db.setFavorite(track.id, false);
+    }
+    // Delete the actual audio file from disk (online tracks are virtual).
+    if (!track.isOnlineTrack()) {
+      try {
+        await invoke("delete_track_file", { filePath: track.filePath });
+      } catch (e) {
+        console.warn("[NeedMusic] Failed to delete file (library entry still removed):", e);
+      }
+    }
     await LibraryManager.getInstance().removeTrack(track.id);
     setTracks(LibraryManager.getInstance().getAllTracks());
+    setPlaylistVersion((v) => v + 1); // cascade may have touched playlists → re-sync LAN
+    setPendingDelete(null);
   }, [player.currentTrack, engine]);
 
   const handleTitleChange = useCallback(async (track: Track, newTitle: string) => {
@@ -503,6 +590,19 @@ const App: React.FC = () => {
   return (
     <div className="app-wrapper">
       <CustomTitleBar />
+      <UpdaterBanner />
+      {playError && (
+        <div className="update-banner update-banner-error">
+          <div className="update-banner-icon"><IconAlert size={16} /></div>
+          <div className="update-banner-text">
+            <strong>Playback failed</strong>
+            <span className="update-banner-sub" style={{ whiteSpace: "pre-line" }}>{playError}</span>
+          </div>
+          <div className="update-banner-actions">
+            <button className="update-banner-dismiss" onClick={() => setPlayError(null)} title="Dismiss"><IconClose size={12} /></button>
+          </div>
+        </div>
+      )}
       <div className="custom-bg-layer" />
       <canvas ref={bgCanvasRef} className={`bg-canvas ${bgClass}`} />
       <div className="app-layout" onContextMenu={handleContextMenu}>
@@ -529,6 +629,16 @@ const App: React.FC = () => {
                   <option key={f} value={f}>Filter: {f}</option>
                 ))}
               </select>
+              <select
+                className="filter-select"
+                value={sortMode}
+                onChange={(e) => setSortMode(e.target.value)}
+                title="Sort tracks"
+              >
+                {SORT_OPTIONS.map((o) => (
+                  <option key={o.value} value={o.value}>{o.label}</option>
+                ))}
+              </select>
               <input
                 className="search-input"
                 type="text"
@@ -542,7 +652,7 @@ const App: React.FC = () => {
             {activeTab === "Home" ? <HomeView tracks={tracks} currentTrack={ct as Track | null} onPlay={handlePlayTrack} /> :
              activeTab === "Albums" ? <AlbumsView tracks={filteredTracks} onPlay={handlePlayTrack} /> :
              activeTab === "Artists" ? <ArtistsView tracks={filteredTracks} /> :
-             activeTab === "Playlists" ? <PlaylistsView tracks={tracks} /> :
+             activeTab === "Playlists" ? <PlaylistsView tracks={tracks} onChanged={() => setPlaylistVersion((v) => v + 1)} /> :
              activeTab === "Online" ? (
                <OnlineSearchView
                  onTrackSaved={() => setTracks(LibraryManager.getInstance().getAllTracks())}
@@ -635,6 +745,20 @@ const App: React.FC = () => {
           </div>
         </div>
       </div>
+      {pendingDelete && (
+        <ConfirmDialog
+          title={`Delete “${pendingDelete.title}”?`}
+          message={pendingDelete.isOnlineTrack() ? (
+            <>This removes the track from your library and from any playlists, including <strong>★ Favorites</strong>.</>
+          ) : (
+            <>This permanently deletes the audio file from your computer and removes the track from your library, playlists, and <strong>★ Favorites</strong>.<br /><span style={{ fontSize: 11, opacity: 0.7 }}>{pendingDelete.filePath}</span></>
+          )}
+          confirmLabel="Delete"
+          danger
+          onConfirm={() => confirmDeleteTrack(pendingDelete)}
+          onCancel={() => setPendingDelete(null)}
+        />
+      )}
     </div>
   );
 };

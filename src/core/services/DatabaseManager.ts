@@ -162,6 +162,47 @@ export class DatabaseManager {
     return rows.length > 0;
   }
 
+  /**
+   * Move a track's file path (e.g. .m4a → .mp3 after conversion): updates the
+   * track id (derived from path), file path, codec, and the playlist links.
+   *
+   * FK-safe ordering: playlist_tracks references tracks(id), so the child
+   * rows must be re-pointed around the parent id change (updating the parent
+   * id while children still reference the old id triggers SQLITE_CONSTRAINT
+   * FOREIGNKEY "code: 787").
+   */
+  async remapTrackFile(oldPath: string, newPath: string): Promise<void> {
+    await this.ensureDb();
+    const newId = Track.generateId(newPath);
+    const oldId = Track.generateId(oldPath);
+
+    // Clear any half-converted duplicate (defensive — the new id shouldn't
+    // exist yet, but a previous failed run may have left one).
+    await this.db!.execute("DELETE FROM tracks WHERE id = $1", [newId]);
+
+    // 1. Save playlist/favorites membership, then drop the child rows so the
+    //    parent id can change without violating the foreign key.
+    const rows: any[] = await this.db!.select(
+      "SELECT playlist_id, position FROM playlist_tracks WHERE track_id = $1",
+      [oldId]
+    );
+    await this.db!.execute("DELETE FROM playlist_tracks WHERE track_id = $1", [oldId]);
+
+    // 2. Update the parent row (id + path + codec).
+    await this.db!.execute(
+      "UPDATE tracks SET id = $1, file_path = $2, codec = 'mp3' WHERE id = $3",
+      [newId, newPath, oldId]
+    );
+
+    // 3. Re-insert the memberships under the new id.
+    for (const r of rows) {
+      await this.db!.execute(
+        "INSERT INTO playlist_tracks (playlist_id, track_id, position) VALUES ($1, $2, $3)",
+        [r.playlist_id, newId, r.position]
+      );
+    }
+  }
+
   /** Update a track's metadata fields (title, artist, album) in the database. */
   async updateTrackMetadata(
     id: TrackId,
