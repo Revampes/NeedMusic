@@ -1,0 +1,13 @@
+{
+  "name": "NeedMusic",
+  "short_name": "NeedMusic",
+  "description": "A high-performance music player for the web",
+  "start_url": "/",
+  "display": "standalone",
+  "background_color": "#0a0a0a",
+  "theme_color": "#0a0a0a",
+  "icons": [
+    { "src": "/icons/icon-128.png", "sizes": "128x128", "type": "image/png" },
+    { "src": "/icons/icon-256.png", "sizes": "256x256", "type": "image/png" }
+  ]
+}
