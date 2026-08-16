@@ -185,7 +185,7 @@ Error generating stack: `+l.message+`
 
   /* The player bar is ALWAYS visible: pinned to the bottom, with matching
      space reserved in the layout so no content hides behind it. */
-  .app-layout { flex-direction: column !important; padding-bottom: calc(118px + env(safe-area-inset-bottom)) !important; }
+  .app-layout { flex-direction: column !important; padding-bottom: calc(140px + env(safe-area-inset-bottom)) !important; }
   .player-bar {
     position: fixed !important;
     left: 0 !important;
@@ -197,75 +197,80 @@ Error generating stack: `+l.message+`
   /* Desktop-only right panel takes too much room on a phone */
   .queue-panel { display: none !important; }
 
-  /* Nav becomes a top bar */
+  /* Nav becomes a top bar — pushed BELOW the iPhone status bar (notch /
+     time & battery) so every button is tappable. */
   .icon-sidebar {
     flex-direction: row !important;
     width: 100% !important;
     min-width: 0 !important;
     height: auto !important;
-    padding: 6px 8px !important;
+    padding: calc(8px + env(safe-area-inset-top)) 8px 8px !important;
     gap: 2px !important;
     justify-content: flex-start !important;
     border-right: none !important;
     border-bottom: 1px solid var(--glass-border, rgba(255,255,255,0.08)) !important;
     overflow-x: auto !important;
     -webkit-overflow-scrolling: touch;
+    align-items: center !important;
   }
-  .icon-nav-item { width: 48px !important; height: 48px !important; flex-shrink: 0 !important; }
+  .icon-nav-item { width: 52px !important; height: 52px !important; flex-shrink: 0 !important; }
+  .icon-nav-item svg { width: 24px !important; height: 24px !important; }
   .icon-nav-spacer { display: none !important; }
 
   .main-area { width: 100% !important; flex: 1 !important; min-height: 0 !important; }
   .content-area { flex: 1 !important; min-height: 0 !important; }
 
   /* Search bar: stack filter + input without overflowing */
-  .content-search-bar { flex-wrap: wrap !important; gap: 6px !important; padding: 6px 10px !important; }
-  .content-search-bar .search-input { width: 100% !important; min-height: 44px !important; }
-  .filter-select { padding: 8px 10px !important; font-size: 14px !important; min-height: 44px !important; }
-  .lan-chip, .online-search-btn { min-height: 40px !important; padding: 8px 12px !important; }
+  .content-search-bar { flex-wrap: wrap !important; gap: 8px !important; padding: 8px 12px !important; }
+  .content-search-bar .search-input { width: 100% !important; min-height: 48px !important; font-size: 16px !important; }
+  .filter-select { padding: 10px 12px !important; font-size: 15px !important; min-height: 48px !important; }
+  .lan-chip, .online-search-btn { min-height: 44px !important; padding: 10px 14px !important; font-size: 13px !important; }
 
   /* Compact two-row player bar pinned to the bottom */
   .player-bar {
     flex-direction: row !important;
     flex-wrap: wrap !important;
     align-items: center !important;
-    gap: 2px 10px !important;
-    padding: 6px 12px !important;
-    padding-bottom: calc(6px + env(safe-area-inset-bottom)) !important;
+    gap: 4px 10px !important;
+    padding: 8px 14px !important;
+    padding-bottom: calc(8px + env(safe-area-inset-bottom)) !important;
     min-height: 0 !important;
   }
-  .player-left { order: 1 !important; flex: 1 !important; width: auto !important; min-width: 0 !important; gap: 10px !important; }
-  .player-artwork { width: 40px !important; height: 40px !important; font-size: 16px !important; }
-  .player-center { order: 3 !important; width: 100% !important; flex-direction: column !important; gap: 2px !important; }
-  .player-controls { justify-content: center !important; gap: 8px !important; }
-  .player-controls .ctrl-btn { min-width: 44px !important; min-height: 44px !important; }
+  .player-left { order: 1 !important; flex: 1 !important; width: auto !important; min-width: 0 !important; gap: 12px !important; }
+  .player-artwork { width: 44px !important; height: 44px !important; font-size: 18px !important; }
+  .player-center { order: 3 !important; width: 100% !important; flex-direction: column !important; gap: 4px !important; }
+  .player-controls { justify-content: center !important; gap: 10px !important; }
+  .player-controls .ctrl-btn { min-width: 48px !important; min-height: 48px !important; }
   /* Repeat (loop) and shuffle MUST be reachable on a phone — only the volume
      slider and the speed selector are hidden (phones have hardware volume
      buttons and speed is a rare need). */
-  .player-right { order: 2 !important; width: auto !important; flex: 0 0 auto !important; gap: 2px !important; }
+  .player-right { order: 2 !important; width: auto !important; flex: 0 0 auto !important; gap: 4px !important; }
   .volume-slider, .speed-select { display: none !important; }
-  .player-right .ctrl-btn { padding: 10px !important; min-width: 44px !important; min-height: 44px !important; }
+  .player-right .ctrl-btn { padding: 10px !important; min-width: 48px !important; min-height: 48px !important; }
   .player-track-details { max-width: 100% !important; }
-  .player-title { font-size: 13px !important; }
-  .player-artist { font-size: 11px !important; }
+  .player-title { font-size: 15px !important; }
+  .player-artist { font-size: 13px !important; }
 
   /* Track list: roomier rows, hide desktop columns */
-  .track-list-header { font-size: 11px !important; padding: 10px !important; }
-  .track-row { font-size: 14px !important; padding: 12px 8px !important; margin: 2px 6px !important; min-height: 56px !important; }
+  .track-list-header { font-size: 12px !important; padding: 12px !important; }
+  .track-row { font-size: 15px !important; padding: 14px 10px !important; margin: 3px 8px !important; min-height: 60px !important; }
   .col-album, .col-artist { display: none !important; }
-  .col-dur { width: 48px !important; font-size: 12px !important; }
-  .col-fav { width: 44px !important; }
-  .col-add, .col-remove, .col-dl, .col-save { width: 44px !important; opacity: 1 !important; font-size: 16px !important; }
-  .track-empty { padding: 40px 20px !important; font-size: 14px !important; }
-  .web-settings button { min-height: 44px !important; padding: 8px 14px !important; }
+  .col-dur { width: 52px !important; font-size: 13px !important; }
+  .col-fav { width: 48px !important; }
+  .col-add, .col-remove, .col-dl, .col-save { width: 48px !important; opacity: 1 !important; font-size: 18px !important; }
+  .track-summary { font-size: 13px !important; padding: 8px 14px !important; }
+  .track-badge { font-size: 10px !important; padding: 2px 8px !important; }
+  .track-empty { padding: 40px 20px !important; font-size: 15px !important; }
+  .web-settings button { min-height: 48px !important; padding: 10px 16px !important; font-size: 15px !important; }
 
   /* Online search: full-width input, comfy rows */
-  .online-search-view { padding: 12px !important; }
-  .online-search-bar { flex-direction: column !important; align-items: stretch !important; gap: 8px !important; }
-  .online-search-input { font-size: 16px !important; padding: 10px 14px !important; }
-  .online-search-btn { padding: 10px 14px !important; font-size: 15px !important; }
-  .online-result-row { padding: 10px 12px !important; }
-  .online-result-row-actions .online-action-btn { padding: 8px 12px !important; font-size: 12px !important; }
-  .online-error, .online-warning { font-size: 13px !important; padding: 10px 12px !important; align-items: flex-start !important; }
+  .online-search-view { padding: 14px !important; }
+  .online-search-bar { flex-direction: column !important; align-items: stretch !important; gap: 10px !important; }
+  .online-search-input { font-size: 16px !important; padding: 12px 14px !important; }
+  .online-search-btn { padding: 12px 16px !important; font-size: 15px !important; min-height: 48px !important; }
+  .online-result-row { padding: 12px 14px !important; }
+  .online-result-row-actions .online-action-btn { padding: 10px 14px !important; font-size: 13px !important; min-height: 44px !important; }
+  .online-error, .online-warning { font-size: 14px !important; padding: 12px 14px !important; align-items: flex-start !important; }
   .online-warning span { min-width: 0 !important; }
 
   /* Playlists: stack the two panes vertically */
@@ -277,12 +282,16 @@ Error generating stack: `+l.message+`
     max-height: 34vh !important;
     flex: 0 0 auto !important;
   }
-  .web-playlists > div:first-child input { font-size: 16px !important; padding: 8px 10px !important; }
+  .web-playlists > div:first-child input { font-size: 16px !important; padding: 12px !important; }
   .web-playlists > div:last-child { flex: 1 !important; min-height: 0 !important; }
+  .web-playlists .track-row { min-height: 60px !important; font-size: 15px !important; }
+  .web-playlists input { min-height: 48px !important; font-size: 16px !important; }
 
   /* Settings: readable on a phone */
-  .web-settings { padding: 14px !important; }
-  .web-settings input { font-size: 16px !important; }
+  .web-settings { padding: 16px !important; font-size: 15px !important; }
+  .web-settings input { font-size: 16px !important; min-height: 44px !important; }
+  .web-settings h4 { font-size: 16px !important; }
+  .web-settings p, .web-settings li { font-size: 14px !important; }
   .lan-connect-row { flex-wrap: wrap !important; }
   .lan-connect-row input { min-width: 100% !important; }
   .settings-row { flex-wrap: wrap !important; gap: 8px !important; }
@@ -292,7 +301,7 @@ Error generating stack: `+l.message+`
 
 @media (max-width: 480px) {
   .player-left .ctrl-btn { display: none !important; }
-  .ctrl-btn { padding: 8px !important; }
-  .play-btn { width: 44px !important; height: 44px !important; }
+  .ctrl-btn { padding: 10px !important; }
+  .play-btn { width: 52px !important; height: 52px !important; }
 }
 `;if(typeof document<"u"){const e=document.createElement("style");e.textContent=Xh,document.head.appendChild(e)}if("serviceWorker"in navigator){const e=window.location.hostname;e!=="localhost"&&e!=="127.0.0.1"&&window.addEventListener("load",()=>{navigator.serviceWorker.register("./sw.js").catch(()=>{})})}ql.createRoot(document.getElementById("root")).render(u.jsx(Yd.StrictMode,{children:u.jsx(Hh,{})}));
