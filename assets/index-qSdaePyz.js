@@ -279,7 +279,7 @@ Error generating stack: `+l.message+`
      time & battery) and content never hides behind the player bar. */
   .app-layout {
     flex-direction: column !important;
-    padding-top: calc(env(safe-area-inset-top) + 16px) !important;
+    padding-top: calc(env(safe-area-inset-top) + 32px) !important;
     padding-bottom: calc(140px + env(safe-area-inset-bottom)) !important;
   }
   .player-bar {
