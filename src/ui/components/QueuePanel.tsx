@@ -1,9 +1,9 @@
 import React, { useState, useEffect, useCallback, useRef } from "react";
-import { PlaybackEngine } from "@core/services/PlaybackEngine";
+import { PlaybackEngine, RepeatMode } from "@core/services/PlaybackEngine";
 import { LibraryManager } from "@core/services/LibraryManager";
 import { DragBridge } from "@core/services/DragBridge";
 import { ITrack } from "@core/interfaces";
-import { IconPlay, IconClose, IconHeartFill } from "@ui/components/Icons";
+import { IconPlay, IconClose, IconHeartFill, IconRepeat, IconRepeatOff } from "@ui/components/Icons";
 
 interface QueuePanelProps {
   /** Optional track lookup — when provided, used instead of LibraryManager. */
@@ -166,6 +166,14 @@ const QueuePanel: React.FC<QueuePanelProps> = ({ libraryTracks, queueVersion, on
   };
 
   const currentIdx = engine.currentIndex_;
+  // Local mirror of the repeat mode so the loop buttons re-render on tap
+  // (Playlist loops the whole queue/favorites list; Off = no loop).
+  const [, setRepeatTick] = useState(0);
+  const looping = engine.repeatMode === RepeatMode.Playlist;
+  const toggleLoop = () => {
+    engine.repeatMode = looping ? RepeatMode.Off : RepeatMode.Playlist;
+    setRepeatTick((t) => t + 1);
+  };
 
   return (
     <aside
@@ -191,15 +199,26 @@ const QueuePanel: React.FC<QueuePanelProps> = ({ libraryTracks, queueVersion, on
       <div className="queue-panel-half">
         <div className="queue-panel-header">
           <span>Queue ({queue.length})</span>
-          {queue.length > 0 && (
-            <button
-              className="queue-play-all-btn"
-              title="Play queue from start"
-              onClick={() => engine.setQueue(engine.queueTracks, 0)}
-            >
-              <IconPlay size={12} />
-            </button>
-          )}
+          <div className="queue-header-actions">
+            {queue.length > 0 && (
+              <>
+                <button
+                  className={`queue-loop-btn ${looping ? "active" : ""}`}
+                  title={looping ? "Looping the queue — tap to turn off" : "Loop the queue"}
+                  onClick={toggleLoop}
+                >
+                  {looping ? <IconRepeat size={12} /> : <IconRepeatOff size={12} />}
+                </button>
+                <button
+                  className="queue-play-all-btn"
+                  title="Play queue from start"
+                  onClick={() => engine.setQueue(engine.queueTracks, 0)}
+                >
+                  <IconPlay size={12} />
+                </button>
+              </>
+            )}
+          </div>
         </div>
         <div className="queue-panel-list">
           {queue.length === 0 ? (
@@ -256,15 +275,26 @@ const QueuePanel: React.FC<QueuePanelProps> = ({ libraryTracks, queueVersion, on
       >
         <div className="queue-panel-header">
           <span>Favorites ({favorites.length})</span>
-          {favorites.length > 0 && (
-            <button
-              className="queue-play-all-btn"
-              title="Play all favorites"
-              onClick={() => engine.setQueue(favorites, 0)}
-            >
-              <IconPlay size={12} />
-            </button>
-          )}
+          <div className="queue-header-actions">
+            {favorites.length > 0 && (
+              <>
+                <button
+                  className={`queue-loop-btn ${looping ? "active" : ""}`}
+                  title={looping ? "Looping favorites — tap to turn off" : "Loop favorites"}
+                  onClick={toggleLoop}
+                >
+                  {looping ? <IconRepeat size={12} /> : <IconRepeatOff size={12} />}
+                </button>
+                <button
+                  className="queue-play-all-btn"
+                  title="Play all favorites"
+                  onClick={() => engine.setQueue(favorites, 0)}
+                >
+                  <IconPlay size={12} />
+                </button>
+              </>
+            )}
+          </div>
         </div>
         <div className="queue-fav-list">
           {favorites.length === 0 ? (

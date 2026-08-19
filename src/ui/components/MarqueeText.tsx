@@ -6,6 +6,9 @@ interface MarqueeTextProps {
   className?: string;
   /** Base pixels-per-second for the slide portion */
   baseSpeed?: number;
+  /** Always scroll when the text overflows (e.g. the currently playing row) —
+   *  phones have no hover, so this is how the title slides like Spotify. */
+  active?: boolean;
 }
 
 /**
@@ -13,6 +16,7 @@ interface MarqueeTextProps {
  * - Text stays clipped within its parent column (no overflow:visible)
  * - Only animates when text is actually wider than the container
  * - Pause → slide → pause → reset cycle
+ * - Animates on hover (desktop), on touch (phones), and when `active`.
  *
  * The keyframe is fixed at: 0%-15% pause, 15%-75% slide, 75%-90% pause, 90%-100% reset.
  * Duration scales with text length so longer text doesn't fly by.
@@ -21,6 +25,7 @@ const MarqueeText: React.FC<MarqueeTextProps> = ({
   children,
   className,
   baseSpeed = 55,
+  active = false,
 }) => {
   const containerRef = useRef<HTMLDivElement>(null);
   const innerRef = useRef<HTMLSpanElement>(null);
@@ -48,7 +53,7 @@ const MarqueeText: React.FC<MarqueeTextProps> = ({
     return () => ro.disconnect();
   }, [children, measure]);
 
-  const needsMarquee = hovering && overflowPx > 2;
+  const needsMarquee = (hovering || active) && overflowPx > 2;
 
   // The slide portion is 60% of the keyframe (15%→75%).
   // Total duration = slideTime / 0.6
@@ -61,6 +66,8 @@ const MarqueeText: React.FC<MarqueeTextProps> = ({
       className={`marquee-container ${className ?? ""}`}
       onMouseEnter={() => setHovering(true)}
       onMouseLeave={() => setHovering(false)}
+      onTouchStart={() => setHovering(true)}
+      onTouchEnd={() => setTimeout(() => setHovering(false), 2500)}
     >
       <span
         ref={innerRef}

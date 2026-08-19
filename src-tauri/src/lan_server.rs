@@ -38,8 +38,10 @@ static WEB_DIST: Dir<'_> = include_dir!("$CARGO_MANIFEST_DIR/../dist-web");
 /// (they are just the app shell; the API stays token-gated).
 const WEB_STATIC_PREFIXES: [&str; 3] = ["/assets/", "/icons/", "/fonts/"];
 
-/// Maximum concurrent connections (thread-per-connection DoS guard).
-const MAX_CONNECTIONS: usize = 8;
+/// Maximum concurrent connections (thread-per-connection DoS guard). Generous
+/// enough that a few slow media-element streams can't starve the download
+/// requests (which open a fresh connection per chunk).
+const MAX_CONNECTIONS: usize = 32;
 
 /// A track as synced from the desktop frontend. `file_path` is server-internal:
 /// it is never serialized to clients (see `library()`).
@@ -128,11 +130,12 @@ impl LanServer {
             .set_nonblocking(true)
             .map_err(|e| format!("Failed to configure LAN server: {}", e))?;
 
-        // Reset the stop flag (Start-after-Stop must work) and issue a fresh token.
+        // Reset the stop flag (Start-after-Stop must work). The token is
+        // persisted across restarts so the phone's saved address keeps working.
         if let Ok(mut f) = self.stop_flag.lock() {
             *f = false;
         }
-        let token = generate_token();
+        let token = load_or_create_token();
         if let Ok(mut t) = self.token.lock() {
             *t = token;
         }
@@ -227,7 +230,10 @@ fn handle_connection(
     token: Arc<Mutex<String>>,
 ) {
     let _ = stream.set_read_timeout(Some(Duration::from_secs(60)));
-    let _ = stream.set_write_timeout(Some(Duration::from_secs(60)));
+    // Generous write budget: a multi-hundred-MB file over slow Wi-Fi can take
+    // minutes; a 60s write timeout would kill the transfer mid-body (which
+    // surfaces on the phone as "download/stream failed").
+    let _ = stream.set_write_timeout(Some(Duration::from_secs(300)));
 
     // Read headers (cap at 64 KB).
     let mut buf: Vec<u8> = Vec::new();
@@ -272,7 +278,11 @@ fn handle_connection(
         write_response(&mut stream, 204, "No Content", &[], b"");
         return;
     }
-    if method != "GET" {
+    // HEAD is accepted too: iOS Safari's media loader sometimes probes audio
+    // with HEAD before Range GETs. It reuses the GET handlers below (which
+    // simply omit the response body).
+    let is_head = method == "HEAD";
+    if method != "GET" && !is_head {
         write_response(&mut stream, 405, "Method Not Allowed", &[], b"GET only");
         return;
     }
@@ -325,7 +335,7 @@ fn handle_connection(
         };
         let path = resolve_track_path(&track);
         match path {
-            Ok(p) => stream_file(&mut stream, &p, range_header.as_deref()),
+            Ok(p) => stream_file(&mut stream, &p, range_header.as_deref(), is_head),
             Err(e) => write_response(&mut stream, 500, "Error", &[], e.as_bytes()),
         }
         return;
@@ -371,7 +381,7 @@ fn handle_connection(
             if title.is_empty() { None } else { Some(&title) },
             if artist.is_empty() { None } else { Some(&artist) },
         ) {
-            Ok(path) => stream_file(&mut stream, Path::new(&path), range_header.as_deref()),
+            Ok(path) => stream_file(&mut stream, Path::new(&path), range_header.as_deref(), is_head),
             Err(e) => write_response(&mut stream, 500, "Error", &[], e.as_bytes()),
         }
         return;
@@ -422,12 +432,22 @@ fn selfless_library(tracks: &Mutex<Vec<LanTrack>>) -> serde_json::Value {
     let public: Vec<serde_json::Value> = tracks
         .iter()
         .map(|t| {
+            // The real container/codec, derived from the file extension on the
+            // server side (file_path itself never leaves the computer). The
+            // phone uses it to pick the right playback element (e.g. m4a/mp4
+            // through <video> on iOS) and to label the track.
+            let codec = std::path::Path::new(&t.file_path)
+                .extension()
+                .and_then(|e| e.to_str())
+                .unwrap_or("")
+                .to_lowercase();
             serde_json::json!({
                 "id": t.id,
                 "title": t.title,
                 "artist": t.artist,
                 "album": t.album,
                 "duration_secs": t.duration_secs,
+                "codec": codec,
             })
         })
         .collect();
@@ -464,7 +484,9 @@ fn resolve_track_path(track: &LanTrack) -> Result<std::path::PathBuf, String> {
 }
 
 /// Stream a file with optional HTTP Range support (needed for Safari seeking).
-fn stream_file(stream: &mut TcpStream, path: &Path, range: Option<&str>) {
+/// `head_only` sends the headers (status/Content-Length/Content-Range) but
+/// omits the body, so iOS Safari's HEAD probes work.
+fn stream_file(stream: &mut TcpStream, path: &Path, range: Option<&str>, head_only: bool) {
     let meta = match std::fs::metadata(path) {
         Ok(m) => m,
         Err(_) => {
@@ -475,6 +497,15 @@ fn stream_file(stream: &mut TcpStream, path: &Path, range: Option<&str>) {
     let total = meta.len();
     let mime = mime_for(path);
     let (start, end) = parse_range(range, total);
+
+    // A byte-range request is only one that actually asks for "bytes=…".
+    // Requests WITHOUT a Range header must get a plain 200 OK — iOS Safari's
+    // media engine (AVFoundation) rejects a 206 to a non-range request, which
+    // surfaces as "isn't playing on this device" even though the file streams
+    // fine (this was the cause of LAN playback failing while fetch worked).
+    let is_byte_range = range
+        .map(|r| r.trim().to_ascii_lowercase().starts_with("bytes="))
+        .unwrap_or(false);
 
     // Reject unsatisfiable / inverted ranges instead of underflowing.
     if total > 0 && start >= total || end < start {
@@ -495,21 +526,35 @@ fn stream_file(stream: &mut TcpStream, path: &Path, range: Option<&str>) {
         return;
     }
 
-    // iOS Safari's media loader is strict: it expects a 206 + Content-Range
-    // for media responses (a plain 200 can fail with "The operation is not
-    // supported"), and its range math must be exact. Always answer 206 with a
-    // proper Content-Range; a missing Range header means the whole file.
-    let (status, reason) = (206, "Partial Content");
+    // 206 Partial Content ONLY when the client actually asked for a byte
+    // range; otherwise 200 with the whole file. Both carry Accept-Ranges so
+    // Safari can seek (its range requests then get exact 206s).
+    let (status, reason) = if is_byte_range && total > 0 {
+        (206, "Partial Content")
+    } else {
+        (200, "OK")
+    };
     let mut out = format!("HTTP/1.1 {} {}\r\n", status, reason);
     out.push_str("Access-Control-Allow-Origin: *\r\n");
     out.push_str("Access-Control-Allow-Methods: GET, OPTIONS\r\n");
     out.push_str("Access-Control-Allow-Headers: Range, Content-Type\r\n");
+    // no-cache: prevents a stale response being reused for a later Range
+    // request on the same URL (the iOS chunked-download bug), while still
+    // letting AVFoundation buffer the media (no-store can interfere with
+    // iOS media playback).
+    out.push_str("Cache-Control: no-cache\r\n");
     out.push_str(&format!("Content-Type: {}\r\n", mime));
     out.push_str("Accept-Ranges: bytes\r\n");
-    out.push_str(&format!("Content-Range: bytes {}-{}/{}\r\n", start, end, total));
+    if status == 206 {
+        out.push_str(&format!("Content-Range: bytes {}-{}/{}\r\n", start, end, total));
+    }
     out.push_str(&format!("Content-Length: {}\r\n", content_len));
     out.push_str("Connection: close\r\n\r\n");
     if stream.write_all(out.as_bytes()).is_err() {
+        return;
+    }
+    // HEAD probes only need the headers.
+    if head_only {
         return;
     }
 
@@ -552,6 +597,46 @@ fn generate_token() -> String {
     let mut bytes = [0u8; 16];
     rand::rngs::OsRng.fill_bytes(&mut bytes);
     bytes.iter().map(|b| format!("{:02x}", b)).collect()
+}
+
+/// Where the LAN token is persisted so it survives app restarts (the phone's
+/// saved address keeps working instead of 401-ing after every restart).
+fn token_file_path() -> std::path::PathBuf {
+    let base = std::env::var("APPDATA")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|_| std::env::temp_dir());
+    base.join("NeedMusic").join("lan_token.txt")
+}
+
+/// Reuse the persisted token if present, otherwise generate and save a new one.
+fn load_or_create_token() -> String {
+    let path = token_file_path();
+    if let Ok(s) = std::fs::read_to_string(&path) {
+        let t = s.trim().to_string();
+        if !t.is_empty() {
+            // Self-heal perms on files created by older builds (or in the
+            // shared temp-dir fallback) so they aren't world-readable.
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                let _ = std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600));
+            }
+            return t;
+        }
+    }
+    let token = generate_token();
+    if let Some(parent) = path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+        let _ = std::fs::write(&path, &token);
+        // Don't leave the token world-readable — on non-Windows where
+        // APPDATA is unset the file falls back to the shared temp dir.
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let _ = std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600));
+        }
+    }
+    token
 }
 
 /// Constant-time byte comparison (no early exit on the first mismatch).
@@ -820,12 +905,16 @@ mod tests {
 
         let mut resp = http_get_bytes(addr, "GET /audio/track_abc123?token=tok123 HTTP/1.1\r\nHost: t\r\n\r\n");
         let mut resp_str = String::from_utf8_lossy(&resp);
-        // Media is always served as 206 + Content-Range (iOS Safari requires
-        // it; a plain 200 can fail with "The operation is not supported").
-        assert!(resp_str.starts_with("HTTP/1.1 206"), "audio must be 206: {resp_str:?}");
-        assert!(resp_str.contains("Content-Range: bytes 0-9/10"), "content-range: {resp_str:?}");
+        // A request WITHOUT a Range header gets a plain 200 + full body —
+        // iOS Safari's media engine rejects a 206 to a non-range request
+        // (which previously surfaced as "isn't playing on this device" even
+        // though fetch worked).
+        assert!(resp_str.starts_with("HTTP/1.1 200"), "no-range audio must be 200: {resp_str:?}");
         assert!(resp_str.contains("audio/mpeg"), "mime must be audio/mpeg: {resp_str:?}");
+        assert!(resp_str.contains("Accept-Ranges: bytes"), "accept-ranges: {resp_str:?}");
+        assert!(resp_str.contains("Cache-Control: no-cache"), "no-cache: {resp_str:?}");
         assert!(resp_str.contains("Access-Control-Allow-Origin: *"), "CORS for fetch: {resp_str:?}");
+        assert!(!resp_str.contains("Content-Range"), "no-range response must not claim partial content: {resp_str:?}");
         assert!(resp.ends_with(&bytes), "body must be the exact file bytes");
 
         // Safari's <audio> element seeks via HTTP Range — must return 206.
@@ -834,6 +923,129 @@ mod tests {
         assert!(resp_str.starts_with("HTTP/1.1 206"), "range must be 206: {resp_str:?}");
         assert!(resp_str.contains("Content-Range: bytes 2-5/10"), "content-range: {resp_str:?}");
         assert_eq!(&resp[resp.len() - 4..], &bytes[2..6], "range body must be bytes 2..6");
+
+        let _ = std::fs::remove_dir_all(&dir);
+        server.join().unwrap();
+    }
+
+    #[test]
+    fn large_file_streams_correctly() {
+        // Downloads fetch a real file in ~512 KB chunks. Verify the server
+        // answers large ranges with the EXACT bytes and Content-Length (a
+        // truncated/mismatched body surfaces on the phone as a failed chunk).
+        use std::net::TcpListener;
+
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+
+        let dir = std::env::temp_dir().join(format!("needmusic-large-test-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("song.mp3");
+        let size = 5 * 1024 * 1024 + 123; // just over 5 MB
+        let mut bytes = vec![0u8; size];
+        for (i, b) in bytes.iter_mut().enumerate() {
+            *b = (i.wrapping_mul(31) & 0xff) as u8;
+        }
+        std::fs::write(&file, &bytes).unwrap();
+
+        let tracks = Arc::new(Mutex::new(vec![LanTrack {
+            id: "t_big".into(),
+            title: "Big".into(),
+            artist: "A".into(),
+            album: "B".into(),
+            file_path: file.to_string_lossy().to_string(),
+            duration_secs: 300.0,
+        }]));
+        let playlists = Arc::new(Mutex::new(Vec::new()));
+        let favorite_ids = Arc::new(Mutex::new(Vec::new()));
+        let token = Arc::new(Mutex::new("tok123".into()));
+
+        let server = std::thread::spawn(move || {
+            for _ in 0..3 {
+                let (stream, _) = listener.accept().unwrap();
+                handle_connection(stream, tracks.clone(), playlists.clone(), favorite_ids.clone(), token.clone());
+            }
+        });
+
+        // 1) Whole file (no Range) → 200, exact Content-Length, full body.
+        let resp = http_get_bytes(addr, "GET /audio/t_big?token=tok123 HTTP/1.1\r\nHost: t\r\n\r\n");
+        let head = String::from_utf8_lossy(&resp[..resp.len().min(4096)]).to_string();
+        assert!(head.starts_with("HTTP/1.1 200"), "whole file must be 200: {head:?}");
+        assert!(head.contains(&format!("Content-Length: {}", size)), "content-length: {head:?}");
+        // resp = headers + body; the body must be the complete file.
+        assert!(resp.ends_with(&bytes), "body must be the complete file (got {} bytes, file {})", resp.len(), size);
+
+        // 2) First 512 KB chunk → 206, exact Content-Range, exact bytes.
+        let resp = http_get_bytes(addr, "GET /audio/t_big?token=tok123 HTTP/1.1\r\nHost: t\r\nRange: bytes=0-524287\r\n\r\n");
+        let head = String::from_utf8_lossy(&resp[..resp.len().min(4096)]).to_string();
+        assert!(head.starts_with("HTTP/1.1 206"), "chunk must be 206: {head:?}");
+        assert!(head.contains(&format!("Content-Range: bytes 0-524287/{}", size)), "content-range: {head:?}");
+        assert!(resp.ends_with(&bytes[..524288]), "chunk body must be bytes 0..524288");
+
+        // 3) Second chunk starting mid-file.
+        let resp = http_get_bytes(addr, "GET /audio/t_big?token=tok123 HTTP/1.1\r\nHost: t\r\nRange: bytes=524288-1048575\r\n\r\n");
+        let head = String::from_utf8_lossy(&resp[..resp.len().min(4096)]).to_string();
+        assert!(head.starts_with("HTTP/1.1 206"), "chunk 2 must be 206: {head:?}");
+        assert!(head.contains(&format!("Content-Range: bytes 524288-1048575/{}", size)), "content-range 2: {head:?}");
+        assert!(resp.ends_with(&bytes[524288..1048576]), "chunk 2 body must be bytes 524288..1048576");
+
+        let _ = std::fs::remove_dir_all(&dir);
+        server.join().unwrap();
+    }
+
+    #[test]
+    fn head_probe_returns_headers_without_body() {
+        // iOS Safari's media loader probes audio with HEAD before Range GETs.
+        // The response must include the media headers but no body bytes.
+        use std::net::TcpListener;
+
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+
+        let dir = std::env::temp_dir().join(format!("needmusic-head-test-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("song.m4a");
+        let bytes = vec![0x00; 128];
+        std::fs::write(&file, &bytes).unwrap();
+
+        let tracks = Arc::new(Mutex::new(vec![LanTrack {
+            id: "t_head".into(),
+            title: "Song".into(),
+            artist: "A".into(),
+            album: "B".into(),
+            file_path: file.to_string_lossy().to_string(),
+            duration_secs: 10.0,
+        }]));
+        let playlists = Arc::new(Mutex::new(Vec::new()));
+        let favorite_ids = Arc::new(Mutex::new(Vec::new()));
+        let token = Arc::new(Mutex::new("tok123".into()));
+
+        let server = std::thread::spawn(move || {
+            for _ in 0..2 {
+                let (stream, _) = listener.accept().unwrap();
+                handle_connection(stream, tracks.clone(), playlists.clone(), favorite_ids.clone(), token.clone());
+            }
+        });
+
+        // HEAD without a Range header → 200 + full Content-Length, no body.
+        let resp = http_get_bytes(addr, "HEAD /audio/t_head?token=tok123 HTTP/1.1\r\nHost: t\r\n\r\n");
+        let resp_str = String::from_utf8_lossy(&resp);
+        assert!(resp_str.starts_with("HTTP/1.1 200"), "HEAD media must be 200: {resp_str:?}");
+        assert!(resp_str.contains("Content-Length: 128"), "content-length: {resp_str:?}");
+        assert!(resp_str.contains("audio/mp4"), "mime must be audio/mp4: {resp_str:?}");
+        assert!(resp_str.contains("Accept-Ranges: bytes"), "accept-ranges: {resp_str:?}");
+        assert!(!resp_str.contains("Content-Range"), "no-range HEAD must not claim partial content: {resp_str:?}");
+        // No body after the header terminator.
+        let body = resp_str.split("\r\n\r\n").nth(1).unwrap_or("");
+        assert!(body.is_empty(), "HEAD must not send a body: {resp_str:?}");
+
+        // HEAD with a Range header → 206 + Content-Range, still no body.
+        let resp = http_get_bytes(addr, "HEAD /audio/t_head?token=tok123 HTTP/1.1\r\nHost: t\r\nRange: bytes=10-19\r\n\r\n");
+        let resp_str = String::from_utf8_lossy(&resp);
+        assert!(resp_str.starts_with("HTTP/1.1 206"), "range HEAD must be 206: {resp_str:?}");
+        assert!(resp_str.contains("Content-Range: bytes 10-19/128"), "content-range: {resp_str:?}");
+        let body = resp_str.split("\r\n\r\n").nth(1).unwrap_or("");
+        assert!(body.is_empty(), "range HEAD must not send a body: {resp_str:?}");
 
         let _ = std::fs::remove_dir_all(&dir);
         server.join().unwrap();
@@ -907,8 +1119,11 @@ mod tests {
         let resp = http_get(addr, "GET /api/library?token=secrettoken123 HTTP/1.1\r\nHost: t\r\n\r\n");
         assert!(resp.starts_with("HTTP/1.1 200 OK"), "api with token must 200: {resp:?}");
         assert!(resp.contains("\"Test Song\""), "library must contain the track: {resp:?}");
-        // file_path must never leak to clients.
+        // file_path must never leak to clients, but the codec (derived from
+        // the extension server-side) is sent so the phone picks the right
+        // playback element.
         assert!(!resp.contains("test.mp3"), "file_path must not be serialized: {resp:?}");
+        assert!(resp.contains("\"codec\":\"mp3\""), "codec must be derived and sent: {resp:?}");
 
         // ── 5) Wrong token → 401, not a bare 404 ──
         let resp = http_get(addr, "GET /api/library?token=wrong HTTP/1.1\r\nHost: t\r\n\r\n");

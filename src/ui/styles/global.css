@@ -452,6 +452,10 @@ body.nm-dragging .queue-panel-item { cursor: copy; }
 .queue-panel{width:260px;min-width:200px;display:flex;flex-direction:column;border-left:1px solid var(--glass-border);background:var(--glass-bg-color);backdrop-filter:blur(var(--glass-blur)) saturate(var(--glass-saturate))}
 .queue-play-all-btn{display:flex;align-items:center;justify-content:center;width:24px;height:24px;background:none;border:1px solid var(--glass-border-strong);border-radius:var(--radius-md);color:var(--text-secondary);cursor:pointer;transition:all var(--transition-fast)}
 .queue-play-all-btn:hover{color:var(--accent-primary);border-color:var(--accent-primary);background:rgba(233,69,96,0.08)}
+.queue-header-actions{display:flex;align-items:center;gap:6px}
+.queue-loop-btn{display:flex;align-items:center;justify-content:center;width:24px;height:24px;background:none;border:1px solid var(--glass-border-strong);border-radius:var(--radius-md);color:var(--text-secondary);cursor:pointer;transition:all var(--transition-fast)}
+.queue-loop-btn:hover{color:var(--accent-primary);border-color:var(--accent-primary)}
+.queue-loop-btn.active{color:var(--accent-primary);border-color:var(--accent-primary);background:rgba(233,69,96,0.12)}
 .queue-panel-empty{padding:var(--space-6) var(--space-4);text-align:center;color:var(--text-tertiary);font-size:var(--text-sm)}
 .queue-panel-item{display:flex;align-items:center;gap:var(--space-2);padding:6px var(--space-3);cursor:grab;font-size:var(--text-sm);transition:background var(--transition-fast)}
 .queue-panel-item:hover{background:var(--row-hover-bg)}.queue-panel-item.current{background:var(--row-active-bg)}

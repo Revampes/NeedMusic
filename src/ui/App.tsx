@@ -117,6 +117,11 @@ const App: React.FC = () => {
       // Pre-install ffmpeg in the background (MP3 conversion dependency).
       invoke("ensure_ffmpeg_installed").catch(() => {});
 
+      // Auto-start the LAN server so the phone can always reach the computer
+      // (no manual Start after every launch). The token is stable across
+      // restarts, so the phone's saved address keeps working.
+      invoke("lan_server_start").catch(() => { /* non-fatal */ });
+
       const db = DatabaseManager.getInstance();
       // ── Restore appearance settings ──
       const restoreTheme = async () => {

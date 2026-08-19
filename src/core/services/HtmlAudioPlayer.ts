@@ -26,8 +26,6 @@ export class HtmlAudioPlayer implements IAudioOutput {
   private playResolve: (() => void) | null = null;
   private playReject: ((e: Error) => void) | null = null;
   private loadStarted = false;
-  /** Set once a source has fallen back from <audio> to <video>. */
-  private usedVideoFallback = false;
 
   constructor() {
     this.audio = new Audio();
@@ -49,6 +47,11 @@ export class HtmlAudioPlayer implements IAudioOutput {
 
   /** True for MP4-family sources, which need the <video> element on iOS. */
   private isMp4Family(url: string): boolean {
+    const lower = url.toLowerCase();
+    // Explicit marker appended by the app when the real format is known to be
+    // MP4-family but the URL hides it (LAN /audio/{id} and blob: URLs don't
+    // end in .mp4). Without this, iOS refuses those files in <audio>.
+    if (lower.includes("__mp4=1")) return true;
     const path = url.split("?")[0].split("#")[0].toLowerCase();
     return path.endsWith(".mp4") || path.endsWith(".m4a") || path.endsWith(".m4b");
   }
@@ -59,7 +62,6 @@ export class HtmlAudioPlayer implements IAudioOutput {
 
   async play(filePathOrUrl: string): Promise<void> {
     this.stop();
-    this.usedVideoFallback = false;
 
     const useVideo = this.isMp4Family(filePathOrUrl);
     this.el = useVideo ? this.video : this.audio;
@@ -69,70 +71,54 @@ export class HtmlAudioPlayer implements IAudioOutput {
       this.playReject = reject;
       this.loadStarted = true;
 
-      const el = this.currentElement();
-      const onCanPlay = () => {
-        el.removeEventListener("canplay", onCanPlay);
-        el.removeEventListener("error", onError);
-        const resolvePlay = this.playResolve;
-        this.playResolve = null;
-        this.playReject = null;
-        resolvePlay?.();
+      // Try one element first (audio or video, guessed from the URL), and if
+      // its source errors, retry ONCE with the other element. iOS is picky
+      // about which element plays which container, and LAN /audio/{id} +
+      // blob: URLs hide the real format — a mislabeled file (e.g. a video
+      // MP4 named .mp3) plays through <video> even though the guess said
+      // <audio>.
+      const tried = new Set<HTMLMediaElement>();
+      const attempt = (el: HTMLMediaElement) => {
+        this.el = el;
+        const onCanPlay = () => {
+          el.removeEventListener("canplay", onCanPlay);
+          el.removeEventListener("error", onError);
+          // If the first play() was blocked (iOS autoplay policy) the data
+          // is buffered now — retry it so playback actually starts (a
+          // no-op when play() already succeeded).
+          if (el.paused) el.play().catch(() => { /* still blocked — surfaces on the next tap */ });
+          const resolvePlay = this.playResolve;
+          this.playResolve = null;
+          this.playReject = null;
+          resolvePlay?.();
+        };
+        const onError = () => {
+          el.removeEventListener("canplay", onCanPlay);
+          el.removeEventListener("error", onError);
+          const other = el === this.audio ? this.video : this.audio;
+          if (!tried.has(other)) {
+            attempt(other);
+            return;
+          }
+          this.playReject?.(new Error(el.error?.message || "Load failed"));
+          this.playReject = null;
+          this.playResolve = null;
+        };
+        tried.add(el);
+        el.addEventListener("canplay", onCanPlay);
+        el.addEventListener("error", onError);
+        el.src = filePathOrUrl;
+        el.volume = this._volume;
+        el.playbackRate = this._rate;
+        el.play().catch(() => {
+          // Autoplay-policy rejection — the error event usually fires too;
+          // if it doesn't, canplay will still fire once data loads.
+          if (!this.playResolve) return;
+          // Do not reject here: a blocked play() can be retried once the
+          // element finishes loading (the error/canplay events decide).
+        });
       };
-      const onError = () => {
-        el.removeEventListener("canplay", onCanPlay);
-        el.removeEventListener("error", onError);
-        const msg = el.error?.message || "Load failed";
-
-        // <audio> failed on an MP4 — retry once through <video> (iOS won't
-        // play MP4 video tracks in an audio element).
-        if (el === this.audio && useVideo && !this.usedVideoFallback) {
-          this.usedVideoFallback = true;
-          this.el = this.video;
-          const v = this.video;
-          const retryCanPlay = () => {
-            v.removeEventListener("canplay", retryCanPlay);
-            v.removeEventListener("error", retryError);
-            const resolvePlay = this.playResolve;
-            this.playResolve = null;
-            this.playReject = null;
-            resolvePlay?.();
-          };
-          const retryError = () => {
-            v.removeEventListener("canplay", retryCanPlay);
-            v.removeEventListener("error", retryError);
-            this.playReject?.(new Error(v.error?.message || msg));
-            this.playReject = null;
-            this.playResolve = null;
-          };
-          v.addEventListener("canplay", retryCanPlay);
-          v.addEventListener("error", retryError);
-          v.src = filePathOrUrl;
-          v.volume = this._volume;
-          v.playbackRate = this._rate;
-          v.play().catch(() => { /* error event will fire */ });
-          return;
-        }
-
-        this.playReject?.(new Error(msg));
-        this.playReject = null;
-        this.playResolve = null;
-      };
-
-      el.addEventListener("canplay", onCanPlay);
-      el.addEventListener("error", onError);
-
-      el.src = filePathOrUrl;
-      el.volume = this._volume;
-      el.playbackRate = this._rate;
-      el.play().catch((e) => {
-        // Autoplay-policy rejection — the error event usually fires too.
-        if (!this.playResolve) return;
-        el.removeEventListener("canplay", onCanPlay);
-        el.removeEventListener("error", onError);
-        this.playReject?.(e instanceof Error ? e : new Error(String(e)));
-        this.playReject = null;
-        this.playResolve = null;
-      });
+      attempt(this.el);
     });
   }
 

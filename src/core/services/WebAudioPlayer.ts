@@ -60,6 +60,9 @@ export class WebAudioPlayer implements IAudioOutput {
       const response = await fetch(filePathOrUrl);
       if (!response.ok) throw new Error(`HTTP ${response.status}`);
       const arrayBuffer = await response.arrayBuffer();
+      // iOS creates the AudioContext suspended; resume it so the decoded
+      // audio actually plays (no-op when already running).
+      await this.ctx.resume().catch(() => {});
       const audioBuffer = await this.ctx.decodeAudioData(arrayBuffer);
 
       this._buffer = audioBuffer;
