@@ -260,6 +260,8 @@ const WebApp: React.FC = () => {
   const [dlVersion, setDlVersion] = useState(0);
   // Track shown in the ⋯ action sheet (mobile).
   const [menuTrack, setMenuTrack] = useState<TrackData | null>(null);
+  // Track whose add-to-playlist modal is open.
+  const [playlistTarget, setPlaylistTarget] = useState<TrackData | null>(null);
   // Spotify-style expanded now-playing sheet.
   const [nowPlaying, setNowPlaying] = useState(false);
 
@@ -998,6 +1000,7 @@ const WebApp: React.FC = () => {
                   onToggleFav={handleToggleFavorite}
                   onRemove={handleRemoveTrack}
                   onEnqueue={handleEnqueue}
+                  onAddToPlaylist={setPlaylistTarget}
                   onDownload={handleDownloadTrack}
                   onSave={saveTrackToFiles}
                   onMenu={setMenuTrack}
@@ -1019,11 +1022,18 @@ const WebApp: React.FC = () => {
           downloading={downloadingId === menuTrack.id}
           onClose={() => setMenuTrack(null)}
           onPlay={() => { const t = menuTrack; setMenuTrack(null); handlePlayTrack(t); }}
-          onEnqueue={() => { const t = menuTrack; setMenuTrack(null); handleEnqueue(t); }}
+          onAddToPlaylist={() => { const t = menuTrack; setMenuTrack(null); setPlaylistTarget(t); }}
           onDownload={() => { const t = menuTrack; setMenuTrack(null); handleDownloadTrack(t); }}
           onSave={() => { const t = menuTrack; setMenuTrack(null); saveTrackToFiles(t); }}
           onRemove={() => { const t = menuTrack; setMenuTrack(null); handleRemoveTrack(t); }}
           onToggleFav={() => { const t = menuTrack; setMenuTrack(null); handleToggleFavorite(t); }}
+        />
+      )}
+      {/* ── Add-to-Playlist modal ── */}
+      {playlistTarget && (
+        <WebAddToPlaylistModal
+          track={playlistTarget}
+          onClose={() => setPlaylistTarget(null)}
         />
       )}
       {/* Player Bar */}
@@ -1200,12 +1210,12 @@ const TrackActionSheet: React.FC<{
   downloading: boolean;
   onClose: () => void;
   onPlay: () => void;
-  onEnqueue: () => void;
+  onAddToPlaylist: () => void;
   onDownload: () => void;
   onSave: () => void;
   onRemove: () => void;
   onToggleFav: () => void;
-}> = ({ track: t, isLocal, downloading, onClose, onPlay, onEnqueue, onDownload, onSave, onRemove, onToggleFav }) => {
+}> = ({ track: t, isLocal, downloading, onClose, onPlay, onAddToPlaylist, onDownload, onSave, onRemove, onToggleFav }) => {
   const item = (icon: React.ReactNode, label: string, onClick: () => void, danger?: boolean) => (
     <button
       className={`action-sheet-item ${danger ? "danger" : ""}`}
@@ -1228,7 +1238,7 @@ const TrackActionSheet: React.FC<{
           </div>
         </div>
         {item(<IconPlay size={18} />, "Play", onPlay)}
-        {item(<IconPlus size={18} />, "Add to queue", onEnqueue)}
+        {item(<IconPlus size={18} />, "Add to playlist", onAddToPlaylist)}
         {item(t.isFavorite ? <IconHeartFill size={18} /> : <IconHeart size={18} />, t.isFavorite ? "Remove from favorites" : "Add to favorites", onToggleFav)}
         {!isLocal && item(<IconDownload size={18} />, downloading ? "Downloading…" : "Download to this device", onDownload)}
         {isLocal && item(<IconFolder size={18} />, "Save to Files", onSave)}
@@ -1246,18 +1256,19 @@ const TrackListView: React.FC<{
   onToggleFav: (t: TrackData) => void;
   onRemove: (t: TrackData) => void;
   onEnqueue?: (t: TrackData) => void;
+  onAddToPlaylist?: (t: TrackData) => void;
   onDownload?: (t: TrackData) => void;
   onSave?: (t: TrackData) => void;
   onMenu?: (t: TrackData) => void;
   isDownloaded?: (id: string) => boolean;
   downloadingId?: string | null;
   lanUrl?: string;
-}> = ({ tracks, currentTrack, onPlay, onToggleFav, onRemove, onEnqueue, onDownload, onSave, onMenu, isDownloaded, downloadingId, lanUrl }) => (
+}> = ({ tracks, currentTrack, onPlay, onToggleFav, onRemove, onEnqueue, onAddToPlaylist, onDownload, onSave, onMenu, isDownloaded, downloadingId, lanUrl }) => (
   <div className="track-list">
     <div className="track-list-header">
       <span className="col-fav">#</span><span className="col-title">Title</span>
       <span className="col-artist">Artist</span><span className="col-album">Album</span>
-      <span className="col-dur"><IconClock size={12} style={{ marginRight: 2 }} /></span><span className="col-add" />
+      <span className="col-dur"><IconClock size={12} style={{ marginRight: 2 }} /></span><span className="col-add" /><span className="col-remove" />
     </div>
     {tracks.length === 0 ? (
       <div className="track-empty">
@@ -1292,7 +1303,7 @@ const TrackListView: React.FC<{
         <span className="col-artist"><MarqueeText>{t.artist}</MarqueeText></span>
         <span className="col-album"><MarqueeText>{t.album}</MarqueeText></span>
         <span className="col-dur">{formatDuration(t.durationSecs)}</span>
-        <span className="col-add" title="Add to queue" onClick={(e) => { e.stopPropagation(); onEnqueue ? onEnqueue(t) : PlaybackEngine.getInstance().enqueue(toPlayableTrack(t) as any); }}>
+        <span className="col-add" title="Add to playlist" onClick={(e) => { e.stopPropagation(); onAddToPlaylist ? onAddToPlaylist(t) : onEnqueue && onEnqueue(t); }}>
           <IconPlus size={14} />
         </span>
         <span className="col-remove" title="Remove" onClick={(e) => { e.stopPropagation(); onRemove(t); }}>
@@ -1774,6 +1785,89 @@ const WebPlaylistsView: React.FC<{ tracks: TrackData[]; onPlay: (t: TrackData) =
             Select or create a playlist
           </div>
         )}
+      </div>
+    </div>
+  );
+};
+
+// ─── Add-to-Playlist modal (web / localStorage-backed) ──
+const WebAddToPlaylistModal: React.FC<{
+  track: TrackData;
+  onClose: () => void;
+}> = ({ track, onClose }) => {
+  const [playlists, setPlaylists] = useState<WebPlaylist[]>(loadPlaylists);
+  const [newName, setNewName] = useState("");
+  const [checked, setChecked] = useState<Record<string, boolean>>({});
+
+  const commit = (next: WebPlaylist[]) => {
+    setPlaylists(next); savePlaylists(next);
+  };
+
+  const handleAdd = () => {
+    let next = playlists;
+    // 1. Create a new playlist if the user typed a non-empty title.
+    const name = newName.trim();
+    let createdId: string | null = null;
+    if (name) {
+      createdId = `pl-${Date.now()}`;
+      next = [...next, { id: createdId, name, trackIds: [] }];
+    }
+    // 2. Add the track into every selected playlist.
+    next = next.map((p) =>
+      checked[p.id] || p.id === createdId
+        ? { ...p, trackIds: [...p.trackIds.filter((id) => id !== track.id), track.id] }
+        : p
+    );
+    commit(next);
+    onClose();
+  };
+
+  const toggle = (id: string) => setChecked((c) => ({ ...c, [id]: !c[id] }));
+
+  return (
+    <div className="modal-backdrop" onClick={onClose}>
+      <div className="add-to-playlist-modal" onClick={(e) => e.stopPropagation()}>
+        <div className="atp-header">
+          <span className="atp-title"><IconPlaylist size={16} style={{ marginRight: 6, verticalAlign: "middle" }} />Add to playlist</span>
+          <button className="atp-close" onClick={onClose} title="Close"><IconClose size={14} /></button>
+        </div>
+
+        <div className="atp-track">
+          <div className="atp-track-title">{track.title}</div>
+          <div className="atp-track-meta">{track.artist} · {track.album}</div>
+        </div>
+
+        <div className="atp-section-label">New playlist</div>
+        <input
+          className="atp-input"
+          type="text"
+          placeholder="Enter a playlist title to create one…"
+          value={newName}
+          onChange={(e) => setNewName(e.target.value)}
+          onKeyDown={(e) => e.key === "Enter" && handleAdd()}
+          autoFocus
+        />
+
+        <div className="atp-section-label">Existing playlists</div>
+        <div className="atp-list">
+          {playlists.length === 0 ? (
+            <div className="atp-empty">No playlists yet — create one above.</div>
+          ) : (
+            playlists.map((p) => (
+              <label key={p.id} className="atp-item">
+                <input type="checkbox" checked={!!checked[p.id]} onChange={() => toggle(p.id)} />
+                <span className="atp-item-name"><IconPlaylist size={12} style={{ marginRight: 6, verticalAlign: "middle" }} />{p.name}</span>
+              </label>
+            ))
+          )}
+        </div>
+
+        <div className="atp-actions">
+          <button className="atp-btn atp-cancel" onClick={onClose}>Cancel</button>
+          <button className="atp-btn atp-add" onClick={handleAdd}>
+            <IconPlus size={13} style={{ marginRight: 4, verticalAlign: "middle" }} />Add to playlist
+          </button>
+        </div>
       </div>
     </div>
   );

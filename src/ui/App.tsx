@@ -34,6 +34,7 @@ import SplashScreen from "@ui/components/SplashScreen";
 import HomeView from "@ui/components/HomeView";
 import UpdaterBanner from "@ui/components/UpdaterBanner";
 import ConfirmDialog from "@ui/components/ConfirmDialog";
+import AddToPlaylistModal from "@ui/components/AddToPlaylistModal";
 import "./styles/design-tokens.css";
 import "./styles/global.css";
 
@@ -117,10 +118,9 @@ const App: React.FC = () => {
       // Pre-install ffmpeg in the background (MP3 conversion dependency).
       invoke("ensure_ffmpeg_installed").catch(() => {});
 
-      // Auto-start the LAN server so the phone can always reach the computer
-      // (no manual Start after every launch). The token is stable across
-      // restarts, so the phone's saved address keeps working.
-      invoke("lan_server_start").catch(() => { /* non-fatal */ });
+      // The LAN server is no longer started automatically. Start it manually
+      // from Settings → LAN Sync whenever needed (avoids opening a port on
+      // every launch by default).
 
       const db = DatabaseManager.getInstance();
       // ── Restore appearance settings ──
@@ -664,7 +664,7 @@ const App: React.FC = () => {
                />
              ) :
              activeTab === "Settings" ? <SettingsView onTracksLoaded={setTracks} /> :
-             <TrackListView tracks={filteredTracks} currentTrack={ct} onPlay={handlePlayTrack} onToggleFav={handleToggleFavorite} onRemove={handleRemoveTrack} onTitleChange={handleTitleChange} />}
+             <TrackListView tracks={filteredTracks} currentTrack={ct} onPlay={handlePlayTrack} onToggleFav={handleToggleFavorite} onRemove={handleRemoveTrack} onTitleChange={handleTitleChange} onPlaylistChanged={() => setPlaylistVersion((v) => v + 1)} />}
           </div>
         </div>
           {showLyrics ? (
@@ -772,10 +772,11 @@ export default App;
 
 // ─── Sub-Views ────────────────────────────────────────
 
-const TrackListView: React.FC<{ tracks: Track[]; currentTrack: ITrack | null; onPlay: (t: Track) => void; onToggleFav: (t: Track) => void; onRemove: (t: Track) => void; onTitleChange: (t: Track, newTitle: string) => void }> =
-  ({ tracks, currentTrack, onPlay, onToggleFav, onRemove, onTitleChange }) => {
+const TrackListView: React.FC<{ tracks: Track[]; currentTrack: ITrack | null; onPlay: (t: Track) => void; onToggleFav: (t: Track) => void; onRemove: (t: Track) => void; onTitleChange: (t: Track, newTitle: string) => void; onPlaylistChanged?: () => void }> =
+  ({ tracks, currentTrack, onPlay, onToggleFav, onRemove, onTitleChange, onPlaylistChanged }) => {
     const [editingId, setEditingId] = React.useState<string | null>(null);
     const [editValue, setEditValue] = React.useState("");
+    const [playlistTarget, setPlaylistTarget] = React.useState<Track | null>(null);
 
     const startEdit = (t: Track) => {
       setEditingId(t.id);
@@ -805,7 +806,7 @@ const TrackListView: React.FC<{ tracks: Track[]; currentTrack: ITrack | null; on
       <div className="track-list-header">
         <span className="col-fav">#</span><span className="col-title">Title</span>
         <span className="col-artist">Artist</span><span className="col-album">Album</span>
-        <span className="col-dur"><IconClock size={12} style={{ marginRight: 2 }} /></span><span className="col-add" />
+        <span className="col-dur"><IconClock size={12} style={{ marginRight: 2 }} /></span><span className="col-add" /><span className="col-remove" />
       </div>
       {tracks.length === 0 ? <div className="track-empty">No tracks found.</div> : tracks.map((t) => (
         <div
@@ -854,10 +855,17 @@ const TrackListView: React.FC<{ tracks: Track[]; currentTrack: ITrack | null; on
           <span className="col-artist"><span className="multiline-text">{t.artist}</span></span>
           <span className="col-album"><span className="multiline-text">{t.album}</span></span>
           <span className="col-dur">{t.formatDuration()}</span>
-          <span className="col-add" title="Add to queue" onClick={(e) => { e.stopPropagation(); PlaybackEngine.getInstance().enqueue(t); }}><IconPlus size={14} /></span>
+          <span className="col-add" title="Add to playlist" onClick={(e) => { e.stopPropagation(); setPlaylistTarget(t); }}><IconPlus size={14} /></span>
           <span className="col-remove" title="Remove from library" onClick={(e) => { e.stopPropagation(); onRemove(t); }}><IconClose size={12} /></span>
         </div>
       ))}
+      {playlistTarget && (
+        <AddToPlaylistModal
+          track={playlistTarget}
+          onClose={() => setPlaylistTarget(null)}
+          onChanged={onPlaylistChanged}
+        />
+      )}
     </div>
   );
 };

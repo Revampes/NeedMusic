@@ -26,14 +26,10 @@ html,body{height:100%;overflow:hidden;background:transparent!important;font-fami
 }
 .dynamic-island {
   width: min(var(--dyn-island-width, 300px), calc(100vw - 8px));
-  background: color-mix(in srgb, var(--dyn-island-bg, #1a1a2e) var(--dyn-island-opacity, 85%), transparent);
-  backdrop-filter: blur(var(--dyn-island-blur, 20px)) saturate(1.4);
-  -webkit-backdrop-filter: blur(var(--dyn-island-blur, 20px)) saturate(1.4);
+  background: transparent;
   border: none;
-  border-radius: 20px;
   padding: 14px 16px 12px;
   cursor: default;
-  box-shadow: 0 8px 40px rgba(0,0,0,0.5);
   overflow: hidden; position: relative;
 }
 .di-glow {
