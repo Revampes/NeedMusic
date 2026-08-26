@@ -213,6 +213,10 @@ function playableAudioUrl(td: TrackData, lanUrl: string, cloudUrl = ""): string 
  */
 function withMp4Hint(url: string, isMp4Family: boolean): string {
   if (!isMp4Family || !url || url.includes("__mp4=1")) return url;
+  // Never append a query marker to blob:/data: URLs — an opaque blob URL with
+  // a `?` fragment can become unresolvable on iOS (→ "load failed"). The marker
+  // is only valid on plain http(s) URLs (localhost / LAN).
+  if (url.startsWith("blob:") || url.startsWith("data:")) return url;
   return url + (url.includes("?") ? "&" : "?") + "__mp4=1";
 }
 
@@ -318,10 +322,14 @@ const WebApp: React.FC = () => {
     if (attached > 0) setDlVersion((v) => v + 1);
   }, []);
 
-  /** Download a track to the phone (fetch → IndexedDB → local blob URL). */
-  const downloadTrack = useCallback(async (td: TrackData): Promise<string> => {
+  /** Download a track to the phone (fetch → IndexedDB → local blob URL).
+   *  When `force` is true, it ALWAYS re-fetches and overwrites the stored
+   *  copy instead of returning the cached one — needed for online tracks whose
+   *  underlying file may have changed format (e.g. the cloud now serves MP3
+   *  instead of the old unplayable fMP4). */
+  const downloadTrack = useCallback(async (td: TrackData, force = false): Promise<string> => {
     const cached = downloadedRef.current.get(td.id);
-    if (cached) return cached;
+    if (cached && !force) return cached;
     // Always fetch from the CURRENT server address/token (a saved URL may
     // hold a dead token after the desktop restarted). Cloud URLs pass through
     // unchanged (see playableAudioUrl).
@@ -845,7 +853,7 @@ const WebApp: React.FC = () => {
       discNumber: null,
       genre: "Online",
       year: null,
-      codec: "mp4",
+      codec: "mp3", // the cloud + LAN both transcode online audio to MP3
       hasArtwork: false,
       dateAdded: new Date(),
       isFavorite: false,
@@ -858,7 +866,9 @@ const WebApp: React.FC = () => {
 
     try {
       setOnlineSaveMsg(null);
-      await downloadTrack(t);
+      // force=true: always re-fetch the latest (MP3) stream and overwrite any
+      // stale cached copy from before the cloud started transcoding.
+      await downloadTrack(t, true);
       setOnlineSaveMsg({ ok: true, text: `Saved "${item.title}" on this device — it can now be played.` });
     } catch (e: any) {
       // Roll back the store entry so it doesn't linger as a broken track.
