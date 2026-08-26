@@ -50,6 +50,18 @@ some very short clips may not have usable audio — that's expected and non-fata
    and choose this repository.
 3. Render detects **`cloud/render.yaml`** and pre-fills a Web Service
    (Docker runtime, Free plan). Give it a name (e.g. `needmusic-cloud`).
+
+   > **Start Command**: if Render marks the **Start Command** field as
+   > *required* and blocks Apply until it's filled, paste exactly:
+   > ```
+   > node --experimental-strip-types cloud/index.ts
+   > ```
+   > Render runs this from the repo root (`/opt/render/project/src`), so the
+   > `cloud/` prefix matters — the server file lives in the `cloud/` folder.
+   > (The Dockerfile also defaults to this path, so leaving the field blank
+   > works too when Render accepts it — but if it insists, use the string
+   > above. No build step is needed; `node` runs the TypeScript directly.)
+
 4. Click **Apply** and wait for the build (a minute or two). You get a live
    URL like `https://needmusic-cloud.onrender.com`.
 5. In the phone web app open **Settings → Cloud Search**, paste

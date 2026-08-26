@@ -23,6 +23,12 @@ services:
     dockerfilePath: ./cloud/Dockerfile
     healthCheckPath: /health
     autoDeploy: true
+    # Render applies this as the Start Command for the Web Service. Render runs
+    # it from the repo root (/opt/render/project/src), so the cloud/ prefix is
+    # required — the server file is cloud/index.ts. If your dashboard flow makes
+    # "Start Command" a required field, paste:
+    #   node --experimental-strip-types cloud/index.ts
+    command: node --experimental-strip-types cloud/index.ts
     envVars:
       - key: PORT
         value: 3001

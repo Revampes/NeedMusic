@@ -177,7 +177,10 @@ tiny **`cloud/`** proxy to [Render's free tier](https://render.com) in ~5 minute
 1. `cloud/` contains a single self-contained Node/TypeScript server (`index.ts`)
    plus `Dockerfile` and `render.yaml`. Point Render at this repo and it deploys
    automatically.
-2. Render gives you a URL like `https://needmusic-cloud.onrender.com`.
+2. If Render asks for a **Start Command**, paste `node --experimental-strip-types cloud/index.ts`
+   (the `cloud/` prefix matters — Render runs this from the repo root, where the
+   file is `cloud/index.ts`). Render then gives you a URL like
+   `https://needmusic-cloud.onrender.com`.
 3. In the phone web app open **Settings → Cloud Search**, paste that URL, tap
    **Enable**. Online search now tries the **cloud first**, and falls back to
    your computer's **LAN server** whenever the cloud is unreachable.
