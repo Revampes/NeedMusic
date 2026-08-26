@@ -1,0 +1,19 @@
+{
+  "name": "needmusic-cloud",
+  "private": true,
+  "version": "1.0.0",
+  "description": "NeedMusic Bilibili-only online search proxy for Render's free tier",
+  "type": "module",
+  "engines": {
+    "node": ">=18"
+  },
+  "scripts": {
+    "start": "node --experimental-strip-types index.ts",
+    "dev": "node --watch --experimental-strip-types index.ts",
+    "typecheck": "tsc --noEmit"
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "typescript": "^5.5.0"
+  }
+}

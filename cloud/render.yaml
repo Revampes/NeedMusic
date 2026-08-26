@@ -1,0 +1,28 @@
+# Render blueprint — deploy NeedMusic's cloud online-search proxy.
+#
+# Steps (one-time, ~5 minutes):
+#   1. Push this repo to GitHub.
+#   2. Go to https://dashboard.render.com/select-repo
+#   3. Pick this repo. Render will detect cloud/render.yaml and pre-fill
+#      everything. Give the service any name, keep the Free plan.
+#   4. Hit "Apply". Render builds the Dockerfile and returns a live URL like
+#      https://needmusic-cloud.onrender.com
+#   5. Paste that URL (https://needmusic-cloud.onrender.com) into the phone's
+#      web app under Settings → Cloud Search → Enable.
+#
+# Notes about the free tier:
+#   - It sleeps after ~15 min of no traffic; the first request after that
+#     triggers a ~50s cold start. Searches still work once warm.
+#   - Bandwidth/CPU are limited. Bilibili search + audio streaming is light
+#     enough, but don't expect heavy sustained YouTube-style loads here.
+services:
+  - type: web
+    name: needmusic-cloud
+    runtime: docker
+    plan: free
+    dockerfilePath: ./cloud/Dockerfile
+    healthCheckPath: /health
+    autoDeploy: true
+    envVars:
+      - key: PORT
+        value: 3001

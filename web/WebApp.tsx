@@ -241,6 +241,15 @@ const WebApp: React.FC = () => {
   const [lanUrl, setLanUrl] = useState(() => {
     try { return localStorage.getItem("needmusic:lanUrl") || ""; } catch { return ""; }
   });
+  // Cloud online-search base URL (Render proxy) — lets phones search online
+  // without the desktop LAN server. Optional; LAN is the built-in fallback.
+  const [cloudUrl, setCloudUrl] = useState(() => {
+    try {
+      const fromQuery = new URLSearchParams(window.location.search).get("cloud");
+      if (fromQuery) { localStorage.setItem("needmusic:cloudUrl", fromQuery); return fromQuery; }
+      return localStorage.getItem("needmusic:cloudUrl") || "";
+    } catch { return ""; }
+  });
   const [lanStatus, setLanStatus] = useState<string | null>(null);
   const [playError, setPlayError] = useState<string | null>(null);
   // Fatal connection problem (stale token / unreachable server) — shown as a
@@ -960,8 +969,13 @@ const WebApp: React.FC = () => {
                 <button onClick={() => setPlayError(null)} style={{ background: "none", border: "none", color: "inherit", cursor: "pointer", padding: 2 }} title="Dismiss"><IconClose size={12} /></button>
               </div>
             )}
-            {activeTab === "Online" && lanUrl ? (
-              <WebOnlineSearch lanUrl={lanUrl} onPlay={handlePlayTrack} />
+            {activeTab === "Online" ? (
+              <WebOnlineSearch
+                cloudUrl={cloudUrl}
+                lanUrl={lanUrl}
+                onPlay={handlePlayTrack}
+                onOpenSettings={() => setActiveTab("Settings")}
+              />
             ) : activeTab === "Playlists" ? (
               <WebPlaylistsView tracks={tracks} onPlay={handlePlayTrack} />
             ) : activeTab === "Queue" ? (
@@ -971,6 +985,14 @@ const WebApp: React.FC = () => {
             ) : activeTab === "Settings" ? (
               <WebSettingsView
                 lanUrl={lanUrl}
+                cloudUrl={cloudUrl}
+                onCloudChange={(url) => {
+                  setCloudUrl(url);
+                  try {
+                    if (url) localStorage.setItem("needmusic:cloudUrl", url);
+                    else localStorage.removeItem("needmusic:cloudUrl");
+                  } catch { /* ignore */ }
+                }}
                 onConnect={(url) => {
                   setLanUrl(url);
                   try { localStorage.setItem("needmusic:lanUrl", url); } catch { /* ignore */ }
@@ -1338,17 +1360,48 @@ const TrackListView: React.FC<{
 
 const WebSettingsView: React.FC<{
   lanUrl: string;
+  cloudUrl: string;
+  onCloudChange: (url: string) => void;
   onConnect: (url: string) => void;
   onDisconnect: () => void;
   syncLibrary: (url: string) => Promise<number>;
   autoStatus?: string | null;
-}> = ({ lanUrl, onConnect, onDisconnect, syncLibrary, autoStatus }) => {
+}> = ({ lanUrl, cloudUrl, onCloudChange, onConnect, onDisconnect, syncLibrary, autoStatus }) => {
   const [theme, setTheme] = useState(localStorage.getItem("needmusic:theme") || "dark");
   const [serverUrl, setServerUrl] = useState(lanUrl);
   const [lanStatus, setLanStatus] = useState<string | null>(null);
   const [lanBusy, setLanBusy] = useState(false);
   const [diag, setDiag] = useState<string | null>(null);
   const [diagBusy, setDiagBusy] = useState(false);
+  const [cloudInput, setCloudInput] = useState(cloudUrl);
+  const [cloudBusy, setCloudBusy] = useState(false);
+  const [cloudStatus, setCloudStatus] = useState<string | null>(null);
+
+  /** Validate a cloud URL by probing /health (fall back to /). */
+  const testCloud = async (url: string) => {
+    const u = url.trim().replace(/\/+$/, "");
+    if (!u) { setCloudStatus("Enter a URL first."); return null; }
+    setCloudBusy(true);
+    setCloudStatus("Testing…");
+    try {
+      const res = await fetch(`${u}/health`);
+      setCloudStatus(res.ok ? "Cloud reachable ✓" : `Cloud responded with HTTP ${res.status}.`);
+      return u;
+    } catch (e) {
+      setCloudStatus("Could not reach the cloud service — check the URL and that it's deployed.");
+      return null;
+    } finally {
+      setCloudBusy(false);
+    }
+  };
+
+  const saveCloud = async () => {
+    const u = cloudInput.trim().replace(/\/+$/, "");
+    if (!u) { onCloudChange(""); setCloudStatus("Cloud search disabled."); return; }
+    const ok = await testCloud(u);
+    if (ok) onCloudChange(ok);
+    else onCloudChange("");
+  };
 
   /** Run a step-by-step connectivity test so failures are exact, not vague. */
   const runDiagnostics = useCallback(async () => {
@@ -1428,6 +1481,43 @@ const WebSettingsView: React.FC<{
           <option value="dark">Dark</option>
           <option value="light">Light</option>
         </select>
+      </div>
+
+      {/* ── Cloud Search (Render) ── */}
+      <div style={{ marginBottom: 16, padding: 12, border: "1px solid #333", borderRadius: 8, background: "#14141f" }}>
+        <h4 style={{ marginBottom: 8, fontSize: 14 }}>☁️ Cloud Search <span style={{ color: "#888", fontSize: 11, fontWeight: 400 }}>(optional, no computer needed)</span></h4>
+        <p style={{ fontSize: 11, color: "#999", marginBottom: 8, lineHeight: 1.5 }}>
+          A free Render web service that runs Bilibili search in the cloud so you can search online music
+          even when your computer is off or on a different network. It only does <strong>search</strong>
+          (Bilibili) — no downloads, no YouTube, no accounts. When the cloud is unreachable this falls back
+          to your computer (LAN sync) automatically.
+        </p>
+        <div style={{ display: "flex", gap: 6, marginBottom: 8 }}>
+          <input
+            value={cloudInput}
+            onChange={(e) => setCloudInput(e.target.value)}
+            placeholder="https://your-app.onrender.com"
+            inputMode="url"
+            style={{ flex: 1, padding: "6px 8px", background: "#1a1a1a", border: "1px solid #333", color: "#e0e0e0", borderRadius: 4, fontSize: 13 }}
+          />
+          <button
+            onClick={saveCloud}
+            disabled={cloudBusy}
+            style={{ padding: "6px 14px", background: cloudUrl ? "#333" : "#2f6fed", color: "#fff", border: "none", borderRadius: 4, cursor: "pointer", fontSize: 13 }}
+          >
+            {cloudBusy ? "…" : cloudUrl ? "Update" : "Enable"}
+          </button>
+          {cloudUrl && (
+            <button
+              onClick={() => { setCloudInput(""); onCloudChange(""); setCloudStatus("Cloud search disabled."); }}
+              style={{ padding: "6px 10px", background: "transparent", color: "#e94560", border: "1px solid #e94560", borderRadius: 4, cursor: "pointer", fontSize: 13 }}
+            >
+              Disable
+            </button>
+          )}
+        </div>
+        {cloudStatus && <p style={{ fontSize: 11, color: cloudStatus.includes("✓") ? "#4ecdc4" : cloudStatus.includes("Could not") || cloudStatus.includes("disabled") ? "#e94560" : "#999", marginBottom: 0 }}>{cloudStatus}</p>}
+        {cloudUrl && !cloudStatus && <p style={{ fontSize: 11, color: "#4ecdc4", marginBottom: 0 }}>Cloud search enabled ✓ (Bilibili). See Render deploy steps in the README to host your own.</p>}
       </div>
 
       {/* ── LAN Sync (experimental) ── */}
@@ -1528,61 +1618,108 @@ const WebSettingsView: React.FC<{
   );
 };
 
-// ─── Online search proxied through the desktop's LAN server ──
+// ─── Online search: cloud (Render) first, desktop LAN as fallback ──
+// The cloud proxy handles Bilibili-only search; the LAN server handles
+// Bilibili + YouTube. Neither is required — they're tried in order and the
+// UI shows which backend answered.
 
-const WebOnlineSearch: React.FC<{ lanUrl: string; onPlay: (t: TrackData) => void }> = ({ lanUrl, onPlay }) => {
+type SearchBackend = "cloud" | "lan";
+
+const WebOnlineSearch: React.FC<{
+  cloudUrl: string;
+  lanUrl: string;
+  onPlay: (t: TrackData) => void;
+  onOpenSettings: () => void;
+}> = ({ cloudUrl, lanUrl, onPlay, onOpenSettings }) => {
   const [q, setQ] = useState("");
   const [results, setResults] = useState<any[]>([]);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [sourceErrors, setSourceErrors] = useState<string[]>([]);
+  const [backend, setBackend] = useState<SearchBackend | null>(null);
+
+  const hasCloud = cloudUrl.trim().length > 0;
+  const hasLan = lanUrl.trim().length > 0;
 
   const search = async () => {
     const query = q.trim();
     if (!query) return;
+    if (!hasCloud && !hasLan) {
+      setError("No search backend configured. Connect to your computer (LAN Sync) or enable Cloud Search in Settings.");
+      return;
+    }
     setLoading(true);
     setError(null);
     setResults([]);
     setSourceErrors([]);
-    try {
-      const res = await fetch(lanApi(lanUrl, `/online/search?q=${encodeURIComponent(query)}`));
-      if (!res.ok) throw new Error(`HTTP ${res.status}`);
-      const data = await res.json();
-      // Merge Bilibili + YouTube round-robin (same as the desktop).
-      const bili: any[] = data.bilibili?.results ?? [];
-      const yt: any[] = data.youtube?.results ?? [];
-      const merged: any[] = [];
-      const max = Math.max(bili.length, yt.length);
-      for (let i = 0; i < max; i++) {
-        if (i < bili.length) merged.push(bili[i]);
-        if (i < yt.length) merged.push(yt[i]);
+    setBackend(null);
+
+    // Try the cloud first, then fall back to the LAN server.
+    const attempts: { name: SearchBackend; api: () => Promise<any> }[] = [];
+    if (hasCloud) attempts.push({ name: "cloud", api: () => fetch(`${cloudUrl.replace(/\/+$/, "")}/online/search?q=${encodeURIComponent(query)}`) });
+    if (hasLan) attempts.push({ name: "lan", api: () => fetch(lanApi(lanUrl, `/online/search?q=${encodeURIComponent(query)}`)) });
+
+    let data: any = null;
+    let lastErr: unknown = null;
+    let usedBackend: SearchBackend | null = null;
+    for (const a of attempts) {
+      try {
+        const res = await a.api();
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        const d = await res.json();
+        // A backend that answered but had zero results is still "working".
+        data = d;
+        usedBackend = a.name;
+        break;
+      } catch (e) {
+        lastErr = e;
       }
-      setResults(merged);
-      // Per-source failures are non-fatal: surface them so the user knows why
-      // a source is missing (e.g. Bilibili blocking the request or YouTube
-      // being disabled — both are proxied through the desktop, not the phone).
-      const errs: string[] = [];
-      if (data.bilibili_error) errs.push(`Bilibili: ${data.bilibili_error}`);
-      if (data.youtube_error) errs.push(`YouTube: ${data.youtube_error}`);
-      setSourceErrors(errs);
-      if (merged.length === 0 && errs.length === 0) setError("No results found. Try a different search term.");
-    } catch (e) {
-      setError(String(e));
-    } finally {
-      setLoading(false);
     }
+
+    if (!data) {
+      setLoading(false);
+      setError(`Search failed on all available backends: ${lastErr}. ${hasCloud ? "Check the cloud URL in Settings." : ""}${hasLan ? " Check that the computer is running and on the same Wi-Fi." : ""}`);
+      return;
+    }
+
+    setBackend(usedBackend);
+    // Merge Bilibili + YouTube round-robin (same as the desktop).
+    const bili: any[] = data.bilibili?.results ?? [];
+    const yt: any[] = data.youtube?.results ?? [];
+    const merged: any[] = [];
+    const max = Math.max(bili.length, yt.length);
+    for (let i = 0; i < max; i++) {
+      if (i < bili.length) merged.push(bili[i]);
+      if (i < yt.length) merged.push(yt[i]);
+    }
+    setResults(merged);
+    // Per-source failures are non-fatal: surface them so the user knows why
+    // a source is missing (YouTube is cloud-unavailable; Bilibili may block).
+    const errs: string[] = [];
+    if (data.bilibili_error) errs.push(`Bilibili: ${data.bilibili_error}`);
+    if (data.youtube_error) errs.push(`YouTube: ${data.youtube_error}`);
+    setSourceErrors(errs);
+    if (merged.length === 0 && errs.length === 0) setError("No results found. Try a different search term.");
+    setLoading(false);
   };
 
   const play = (item: any) => {
-    // The desktop server downloads to its temp cache and streams the file.
     const idOrUrl = item.source === "youtube" ? item.url : item.bvid;
-    const audioUrl = lanApi(
-      lanUrl,
-      `/online/audio?source=${encodeURIComponent(item.source)}` +
-        `&id=${encodeURIComponent(idOrUrl)}` +
-        `&title=${encodeURIComponent(item.title)}` +
-        `&artist=${encodeURIComponent(item.author)}`
-    );
+    let audioUrl: string;
+    if (usingCloud(backend, hasCloud) && item.source === "bilibili") {
+      // Cloud playback: stream the bvid's audio through the Render proxy.
+      // (YouTube is not available on the cloud backend.)
+      audioUrl = `${cloudUrl.replace(/\/+$/, "")}/online/audio?id=${encodeURIComponent(idOrUrl)}`;
+    } else {
+      // Desktop LAN server downloads to its temp cache and streams the file.
+      audioUrl = lanApi(
+        lanUrl,
+        `/online/audio?source=${encodeURIComponent(item.source)}` +
+          `&id=${encodeURIComponent(idOrUrl)}` +
+          `&title=${encodeURIComponent(item.title)}` +
+          `&artist=${encodeURIComponent(item.author)}`
+      );
+    }
     onPlay({
       id: `web-online-${item.source}-${item.id}`,
       title: item.title,
@@ -1609,7 +1746,7 @@ const WebOnlineSearch: React.FC<{ lanUrl: string; onPlay: (t: TrackData) => void
         <input
           className="online-search-input"
           type="text"
-          placeholder="Search Bilibili & YouTube (via your computer)..."
+          placeholder={hasCloud || hasLan ? "Search Bilibili (YouTube via LAN)…" : "Search online music…"}
           value={q}
           onChange={(e) => setQ(e.target.value)}
           onKeyDown={(e) => { if (e.key === "Enter") search(); }}
@@ -1619,6 +1756,23 @@ const WebOnlineSearch: React.FC<{ lanUrl: string; onPlay: (t: TrackData) => void
           {loading ? "Searching..." : "Search"}
         </button>
       </div>
+      {!hasCloud && !hasLan && !results.length && (
+        <div className="online-warning" style={{ marginTop: 8 }}>
+          <IconAlert size={14} />
+          <span>
+            No backend enabled. To search online without a computer, enable <strong>Cloud Search</strong> —
+            or sync with your computer (LAN).{" "}
+            <button onClick={onOpenSettings} style={{ background: "none", border: "none", color: "#2f6fed", cursor: "pointer", fontWeight: 600, padding: 0, fontSize: 12 }}>Open Settings</button>
+          </span>
+        </div>
+      )}
+      {backend && !error && (
+        <div style={{ marginTop: 8, fontSize: 11, color: backend === "cloud" ? "#4ecdc4" : "#bbb" }}>
+          {backend === "cloud"
+            ? "☁️ Searched through cloud (Bilibili). Computer not needed."
+            : "🖥️ Searched through your computer (LAN). Cloud off/unreachable."}
+        </div>
+      )}
       {error && (
         <div className="online-error">
           <IconClose size={14} />
@@ -1629,7 +1783,7 @@ const WebOnlineSearch: React.FC<{ lanUrl: string; onPlay: (t: TrackData) => void
         <div className="online-warning" style={{ marginTop: 8 }}>
           <IconAlert size={14} />
           <span>
-            Some sources are unavailable (search runs on your computer, not the phone):
+            Some sources are unavailable:
             {sourceErrors.map((e, i) => <span key={i} style={{ display: "block", fontSize: 11, opacity: 0.9 }}>• {e}</span>)}
           </span>
         </div>
@@ -1653,15 +1807,21 @@ const WebOnlineSearch: React.FC<{ lanUrl: string; onPlay: (t: TrackData) => void
           </div>
         ))}
       </div>
-      {!loading && results.length === 0 && !error && (
+      {!loading && results.length === 0 && !error && (hasCloud || hasLan) && (
         <div className="online-empty">
           <IconGlobe size={32} />
-          <p>Search music from Bilibili & YouTube — playback downloads through your computer.</p>
+          <p>Search music from Bilibili & YouTube. Playback streams through the cloud (Bilibili) or your computer (LAN).</p>
         </div>
       )}
     </div>
   );
 };
+
+// Whether the currently-searched backend is the cloud. Falls back to the LAN
+// for YouTube items (the cloud does not serve YouTube).
+function usingCloud(backend: SearchBackend | null, hasCloud: boolean): boolean {
+  return hasCloud && backend !== "lan";
+}
 
 function formatDuration(secs: number): string {
   if (!isFinite(secs) || secs <= 0) return "0:00";

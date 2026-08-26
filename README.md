@@ -73,6 +73,8 @@ After installing, point NeedMusic at your local music folder and it will automat
 - **Simultaneous search** — results from both platforms appear in separate sections
 - **Stream** — one-click play without saving (temp download, auto-cleaned)
 - **Save to library** — download permanently into your music folder
+- **Cloud search (optional)** — deploy the tiny `cloud/` proxy to Render's free tier and
+  phones can run Bilibili search **without a computer**, with automatic fallback to LAN sync
 - YouTube search is **opt-in** via Settings (requires [yt-dlp](https://github.com/yt-dlp/yt-dlp) — auto-installed on first use)
 - YouTube downloads are **audio-only** (no video) using yt-dlp
 - ⚠️ YouTube downloads are provided for personal use — enable at your own risk
@@ -167,16 +169,38 @@ Stream your library to your phone over Wi-Fi — no cloud, no accounts:
 
 Online search on the phone is proxied through the desktop, so Bilibili/YouTube search works exactly like on desktop. The phone only stores what it plays; nothing is uploaded anywhere.
 
+### ☁️ Cloud Search (optional) — search without your computer
+
+Want phone online-search even when the desktop (and LAN) is offline? Deploy the
+tiny **`cloud/`** proxy to [Render's free tier](https://render.com) in ~5 minutes:
+
+1. `cloud/` contains a single self-contained Node/TypeScript server (`index.ts`)
+   plus `Dockerfile` and `render.yaml`. Point Render at this repo and it deploys
+   automatically.
+2. Render gives you a URL like `https://needmusic-cloud.onrender.com`.
+3. In the phone web app open **Settings → Cloud Search**, paste that URL, tap
+   **Enable**. Online search now tries the **cloud first**, and falls back to
+   your computer's **LAN server** whenever the cloud is unreachable.
+
+The cloud service is **Bilibili-only** and **search-only** by design — see
+[`cloud/README.md`](cloud/README.md) for why (free-tier limits + YouTube
+requires `yt-dlp`/ffmpeg and heavy bandwidth). YouTube search still works on the
+desktop/LAN.
+
+> **Free-tier note:** Render's free service sleeps after ~15 min idle; the first
+> search after that takes ~15–50s to cold-start, then runs normally. The cloud is
+> public (no auth) — anyone with your URL can issue searches, so keep it personal.
+
 ---
 
 ## 🔒 User Privacy
 
 NeedMusic is built with privacy as a core principle:
 
-- **No telemetry.** NeedMusic does **not** collect, report, or send any usage data, analytics, or crash reports anywhere. There is no backend server operated by NeedMusic.
+- **No telemetry.** NeedMusic does **not** collect, report, or send any usage data, analytics, or crash reports anywhere. There is no first-party backend server operated by NeedMusic.
 - **No accounts.** There is no login, no user registration, and no cloud sync. Everything lives on your machine.
 - **Local-first storage.** Your music library metadata, playlists, favorites, and settings are stored exclusively in a **local SQLite database** (`needmusic.db`) on your computer. In the web build, data is stored in your browser's `localStorage`.
-- **Online search transparency.** When you use the Bilibili search feature, search queries are sent directly from your machine to `api.bilibili.com`. NeedMusic does not proxy, intercept, or log these requests.
+- **Online search transparency.** When you use the Bilibili search feature, search queries are sent directly from your machine to `api.bilibili.com`. NeedMusic does not proxy, intercept, or log these requests. *(If you **optionally** enable Cloud Search in the web app, queries first go to the `cloud/` proxy you choose to host on Render, which then calls Bilibili — only search text is passed, and the proxy logs nothing.)*
 - **Discord Rich Presence.** When enabled, track information (title, artist, album) is sent to your **local Discord client** via named pipe IPC — it never leaves your machine. Disable it anytime from Settings.
 - **No network requests at startup.** The app makes zero outbound connections unless you explicitly use the online search feature or enable Discord Rich Presence.
 
