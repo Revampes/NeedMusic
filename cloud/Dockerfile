@@ -1,7 +1,13 @@
 # NeedMusic cloud proxy — runs on Render's free tier.
-# Minimal: just the Node runtime. The server uses only Node built-ins
-# (http, url, crypto), so there are no runtime dependencies to install.
+# The server uses only Node built-ins (http, url, crypto, child_process) plus
+# ffmpeg (installed below) to transcode Bilibili's fMP4 DASH audio into a plain
+# MP3 that iOS Safari can actually play (the desktop does the same conversion).
 FROM node:20-slim
+
+# ffmpeg: transcodes Bilibili DASH audio → MP3 (browser-playable, incl. iOS).
+RUN apt-get update \
+  && apt-get install -y --no-install-recommends ffmpeg \
+  && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
 

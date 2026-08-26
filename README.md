@@ -185,10 +185,12 @@ tiny **`cloud/`** proxy to [Render's free tier](https://render.com) in ~5 minute
    **Enable**. Online search now tries the **cloud first**, and falls back to
    your computer's **LAN server** whenever the cloud is unreachable.
 
-The cloud service is **Bilibili-only** and **search-only** by design — see
-[`cloud/README.md`](cloud/README.md) for why (free-tier limits + YouTube
-requires `yt-dlp`/ffmpeg and heavy bandwidth). YouTube search still works on the
-desktop/LAN.
+The cloud service is **Bilibili-only** and lightweight by design — see
+[`cloud/README.md`](cloud/README.md). It serves search results and, when you
+tap **Save**, downloads + transcodes the audio to MP3 (via ffmpeg) so the track
+plays on any phone, including iOS Safari — mirroring what the desktop's "Save"
+does. YouTube is intentionally not on the cloud (it needs `yt-dlp` and heavy
+bandwidth); YouTube search/download still works on the desktop/LAN.
 
 > **Free-tier note:** Render's free service sleeps after ~15 min idle; the first
 > search after that takes ~15–50s to cold-start, then runs normally. The cloud is

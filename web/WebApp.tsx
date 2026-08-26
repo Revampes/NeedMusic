@@ -181,12 +181,19 @@ function lanApi(lanUrl: string, pathAndQuery: string): string {
  *   (the token in a saved URL goes dead when the desktop restarts), which
  *   is the #1 cause of "I can see the tracks but playback fails".
  */
-function playableAudioUrl(td: TrackData, lanUrl: string): string {
+function playableAudioUrl(td: TrackData, lanUrl: string, cloudUrl = ""): string {
   if (!td.audioUrl) return "";
   if (td.audioUrl.startsWith("blob:") || td.audioUrl.startsWith("data:")) return td.audioUrl;
   try {
     const u = new URL(td.audioUrl);
     if (u.protocol !== "http:" && u.protocol !== "https:") return td.audioUrl;
+    // A cloud (Render) URL is used EXACTLY as-is — only LAN URLs get rewritten
+    // to the current server/token. Rewriting a cloud URL against the desktop
+    // would break the download (and iOS can't play the mangled URL).
+    if (cloudUrl) {
+      const cu = new URL(cloudUrl);
+      if (u.origin === cu.origin) return td.audioUrl;
+    }
     if (!lanUrl) return td.audioUrl; // no server known — let play() fail loudly
     // Strip the old token, keep the rest of the path/query, re-point at the
     // current server with the current token.
@@ -316,13 +323,14 @@ const WebApp: React.FC = () => {
     const cached = downloadedRef.current.get(td.id);
     if (cached) return cached;
     // Always fetch from the CURRENT server address/token (a saved URL may
-    // hold a dead token after the desktop restarted).
-    const src = playableAudioUrl(td, lanUrl);
+    // hold a dead token after the desktop restarted). Cloud URLs pass through
+    // unchanged (see playableAudioUrl).
+    const src = playableAudioUrl(td, lanUrl, cloudUrl);
     if (!src) {
       throw new Error(
-        lanUrl
-          ? "this track has no source on the computer — rescan your library and reconnect."
-          : "not connected to your computer — connect in Settings first."
+        lanUrl || cloudUrl
+          ? "this track has no source available — try searching again."
+          : "connect to your computer (LAN) or enable Cloud Search in Settings first."
       );
     }
     setDownloadingId(td.id);
@@ -344,7 +352,7 @@ const WebApp: React.FC = () => {
     } finally {
       setDownloadingId(null);
     }
-  }, [lanUrl]);
+  }, [lanUrl, cloudUrl]);
 
   /** Download a single track, surfacing failures instead of swallowing them. */
   const handleDownloadTrack = useCallback(async (td: TrackData) => {
@@ -362,7 +370,7 @@ const WebApp: React.FC = () => {
 
   /** Download every track in the given list to the phone. */
   const handleDownloadAll = useCallback(async (list: TrackData[]) => {
-    const pending = list.filter((td) => !downloadedRef.current.has(td.id) && playableAudioUrl(td, lanUrl));
+    const pending = list.filter((td) => !downloadedRef.current.has(td.id) && playableAudioUrl(td, lanUrl, cloudUrl));
     let ok = 0;
     let fail = 0;
     let firstErr = "";
@@ -377,7 +385,7 @@ const WebApp: React.FC = () => {
     if (fail > 0) {
       setPlayError(`Saved ${ok} of ${pending.length} tracks on this device (${fail} failed: ${firstErr}).`);
     }
-  }, [downloadTrack, lanUrl]);
+  }, [downloadTrack, lanUrl, cloudUrl]);
 
   /** Download the track as a REAL file the user can find in the Files app. */
   const saveTrackToFiles = useCallback(async (td: TrackData) => {
@@ -798,6 +806,68 @@ const WebApp: React.FC = () => {
     }
   }, [engine, lanUrl, downloadTrack]);
 
+  // Last Save action result, shown in the Online search view.
+  const [onlineSaveMsg, setOnlineSaveMsg] = useState<{ ok: boolean; text: string } | null>(null);
+
+  /**
+   * Save an online (Bilibili/YouTube) search result to this device so it plays
+   * reliably offline — mirroring how LAN tracks are downloaded. The button is
+   * "Save" (not "Play") because streaming the raw cloud MP4-DASH blend fails on
+   * iOS Safari; saving the file first plays every time.
+   */
+  const handleOnlineSave = useCallback(async (item: any) => {
+    const idOrUrl = item.source === "youtube" ? item.url : item.bvid;
+    let audioUrl: string;
+    // Cloud serves Bilibili only; YouTube always routes through the desktop LAN.
+    const useCloud = cloudUrl.trim().length > 0 && item.source === "bilibili";
+    if (useCloud) {
+      // Cloud streaming: pass the bvid's audio through the Render proxy.
+      audioUrl = `${cloudUrl.replace(/\/+$/, "")}/online/audio?id=${encodeURIComponent(idOrUrl)}`;
+    } else {
+      // Desktop LAN server downloads to its temp cache and streams the file.
+      audioUrl = lanApi(
+        lanUrl,
+        `/online/audio?source=${encodeURIComponent(item.source)}` +
+          `&id=${encodeURIComponent(idOrUrl)}` +
+          `&title=${encodeURIComponent(item.title)}` +
+          `&artist=${encodeURIComponent(item.author)}`
+      );
+    }
+
+    const t: TrackData = {
+      id: `web-online-${item.source}-${item.id}`,
+      title: item.title,
+      artist: item.author,
+      album: item.source === "youtube" ? "YouTube" : "Bilibili",
+      albumArtist: item.author,
+      durationSecs: item.duration_secs || 0,
+      trackNumber: null,
+      discNumber: null,
+      genre: "Online",
+      year: null,
+      codec: "mp4",
+      hasArtwork: false,
+      dateAdded: new Date(),
+      isFavorite: false,
+      audioUrl,
+      sourceName: item.title,
+    };
+    // Add it to the local library so it shows up in the Tracks view.
+    webTrackStore.addTrack(t);
+    persistTracks(webTrackStore.getAll());
+
+    try {
+      setOnlineSaveMsg(null);
+      await downloadTrack(t);
+      setOnlineSaveMsg({ ok: true, text: `Saved "${item.title}" on this device — it can now be played.` });
+    } catch (e: any) {
+      // Roll back the store entry so it doesn't linger as a broken track.
+      webTrackStore.removeTrack(t.id);
+      persistTracks(webTrackStore.getAll());
+      setOnlineSaveMsg({ ok: false, text: `Couldn't save "${item.title}": ${(e && e.message) || e}.` });
+    }
+  }, [cloudUrl, lanUrl, downloadTrack, persistTracks]);
+
   const handleToggleFavorite = useCallback((td: TrackData) => {
     td.isFavorite = !td.isFavorite;
     webTrackStore.addTrack(td); // update in store
@@ -873,8 +943,8 @@ const WebApp: React.FC = () => {
           <div className={`icon-nav-item ${activeTab === "Tracks" ? "active" : ""}`} onClick={() => setActiveTab("Tracks")} title="Tracks"><IconLibrary size={18} /></div>
           <div className={`icon-nav-item ${activeTab === "Playlists" ? "active" : ""}`} onClick={() => setActiveTab("Playlists")} title="Playlists"><IconPlaylist size={18} /></div>
           <div className={`icon-nav-item ${activeTab === "Queue" ? "active" : ""}`} onClick={() => setActiveTab(activeTab === "Queue" ? "Tracks" : "Queue")} title="Queue & Favorites"><IconClock size={18} /></div>
-          {lanUrl && (
-            <div className={`icon-nav-item ${activeTab === "Online" ? "active" : ""}`} onClick={() => setActiveTab("Online")} title="Online Search (via desktop)"><IconGlobe size={18} /></div>
+          {(cloudUrl || lanUrl) && (
+            <div className={`icon-nav-item ${activeTab === "Online" ? "active" : ""}`} onClick={() => setActiveTab("Online")} title="Online Search"><IconGlobe size={18} /></div>
           )}
           <div className="icon-nav-spacer" />
           <div className={`icon-nav-item ${activeTab === "Settings" ? "active" : ""}`} onClick={() => setActiveTab("Settings")} title="Settings"><IconSettings size={18} /></div>
@@ -973,7 +1043,8 @@ const WebApp: React.FC = () => {
               <WebOnlineSearch
                 cloudUrl={cloudUrl}
                 lanUrl={lanUrl}
-                onPlay={handlePlayTrack}
+                onSave={handleOnlineSave}
+                saveMsg={onlineSaveMsg}
                 onOpenSettings={() => setActiveTab("Settings")}
               />
             ) : activeTab === "Playlists" ? (
@@ -1628,9 +1699,10 @@ type SearchBackend = "cloud" | "lan";
 const WebOnlineSearch: React.FC<{
   cloudUrl: string;
   lanUrl: string;
-  onPlay: (t: TrackData) => void;
+  onSave: (item: any) => void;
+  saveMsg: { ok: boolean; text: string } | null;
   onOpenSettings: () => void;
-}> = ({ cloudUrl, lanUrl, onPlay, onOpenSettings }) => {
+}> = ({ cloudUrl, lanUrl, onSave, saveMsg, onOpenSettings }) => {
   const [q, setQ] = useState("");
   const [results, setResults] = useState<any[]>([]);
   const [loading, setLoading] = useState(false);
@@ -1704,46 +1776,15 @@ const WebOnlineSearch: React.FC<{
   };
 
   const play = (item: any) => {
-    const idOrUrl = item.source === "youtube" ? item.url : item.bvid;
-    let audioUrl: string;
-    if (usingCloud(backend, hasCloud) && item.source === "bilibili") {
-      // Cloud playback: stream the bvid's audio through the Render proxy.
-      // (YouTube is not available on the cloud backend.)
-      audioUrl = `${cloudUrl.replace(/\/+$/, "")}/online/audio?id=${encodeURIComponent(idOrUrl)}`;
-    } else {
-      // Desktop LAN server downloads to its temp cache and streams the file.
-      audioUrl = lanApi(
-        lanUrl,
-        `/online/audio?source=${encodeURIComponent(item.source)}` +
-          `&id=${encodeURIComponent(idOrUrl)}` +
-          `&title=${encodeURIComponent(item.title)}` +
-          `&artist=${encodeURIComponent(item.author)}`
-      );
-    }
-    onPlay({
-      id: `web-online-${item.source}-${item.id}`,
-      title: item.title,
-      artist: item.author,
-      album: item.source === "youtube" ? "YouTube" : "Bilibili",
-      albumArtist: item.author,
-      durationSecs: item.duration_secs || 0,
-      trackNumber: null,
-      discNumber: null,
-      genre: "Online",
-      year: null,
-      codec: "mp4",
-      hasArtwork: false,
-      dateAdded: new Date(),
-      isFavorite: false,
-      audioUrl,
-      sourceName: item.title,
-    });
+    // Save-then-play: the parent handler picks the right backend (cloud for
+    // Bilibili, LAN for YouTube) and downloads it to this device, where iOS
+    // can play it reliably.
+    onSave(item);
   };
 
   return (
     <div className="online-search-view">
-      <div className="online-search-bar">
-        <input
+      <div className="online-search-bar">        <input
           className="online-search-input"
           type="text"
           placeholder={hasCloud || hasLan ? "Search Bilibili (YouTube via LAN)…" : "Search online music…"}
@@ -1788,6 +1829,12 @@ const WebOnlineSearch: React.FC<{
           </span>
         </div>
       )}
+      {saveMsg && (
+        <div className={saveMsg.ok ? "online-warning" : "online-error"} style={{ marginTop: 8 }}>
+          {saveMsg.ok ? <IconCheck size={14} /> : <IconClose size={14} />}
+          <span>{saveMsg.text}</span>
+        </div>
+      )}
       <div className="online-results-list" style={{ paddingTop: 8 }}>
         {results.map((item) => (
           <div key={`${item.source}-${item.id}`} className="online-result-row">
@@ -1800,8 +1847,8 @@ const WebOnlineSearch: React.FC<{
             </div>
             <div className="online-result-row-actions">
               <button className="online-action-btn play" onClick={() => play(item)}>
-                <IconPlay size={12} />
-                Play
+                <IconDownload size={12} />
+                Save
               </button>
             </div>
           </div>
@@ -1810,18 +1857,12 @@ const WebOnlineSearch: React.FC<{
       {!loading && results.length === 0 && !error && (hasCloud || hasLan) && (
         <div className="online-empty">
           <IconGlobe size={32} />
-          <p>Search music from Bilibili & YouTube. Playback streams through the cloud (Bilibili) or your computer (LAN).</p>
+          <p>Search music from Bilibili & YouTube. Tap <strong>Save</strong> to download a track onto this device and play it offline.</p>
         </div>
       )}
     </div>
   );
 };
-
-// Whether the currently-searched backend is the cloud. Falls back to the LAN
-// for YouTube items (the cloud does not serve YouTube).
-function usingCloud(backend: SearchBackend | null, hasCloud: boolean): boolean {
-  return hasCloud && backend !== "lan";
-}
 
 function formatDuration(secs: number): string {
   if (!isFinite(secs) || secs <= 0) return "0:00";

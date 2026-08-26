@@ -36,10 +36,16 @@ curl "http://localhost:3001/health"                            # → ok
 curl "http://localhost:3001/online/search?q=周杰伦"              # → JSON results
 ```
 
-The audio endpoint `/online/audio?id=BVxxxxx` streams the video's audio
-through the proxy so the phone's browser can play it despite Bilibili's
-cross-origin restrictions. It is a best-effort pass-through (no transcode), so
-some very short clips may not have usable audio — that's expected and non-fatal.
+The audio endpoint `/online/audio?id=BVxxxxx` **downloads the video's audio and
+transcodes it to MP3 with ffmpeg** before serving it back — a plain MP3 plays on
+any phone browser, including iOS Safari (which refuses the raw fMP4 that
+Bilibili serves). Transcoded files are cached per video for ~1 hour, so repeat
+plays/seek requests don't re-transcode. It requires **ffmpeg** on `PATH` (or
+`FFMPEG_PATH`). If a video honestly has no accessible audio, it returns a clean
+HTTP error and the web app shows what failed.
+
+The `cloud/` dev deps include `ffmpeg-static`, so `npm install && npm start`
+works locally even without a system ffmpeg; the server auto-detects it.
 
 ---
 
@@ -80,8 +86,10 @@ some very short clips may not have usable audio — that's expected and non-fata
 
 ### Environment variables
 
-| Var    | Default | Meaning                                   |
-|--------|---------|-------------------------------------------|
-| `PORT` | `3001`  | Port Render assigns. Your Dockerfile + `render.yaml` already set it. |
+| Var          | Default  | Meaning                                                                                       |
+|--------------|----------|-----------------------------------------------------------------------------------------------|
+| `PORT`       | `3001`   | Port Render assigns. Your Dockerfile + `render.yaml` already set it.                          |
+| `FFMPEG_PATH`| `ffmpeg` | Full path to an ffmpeg binary. On Render it's installed via apt; set this only for custom setups. |
 
-No other config is needed.
+No other config is needed. Transcoding is essential for iOS playback, so the
+cloud image bundles ffmpeg (see the `Dockerfile`).

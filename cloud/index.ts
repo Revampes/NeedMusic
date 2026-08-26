@@ -21,6 +21,10 @@
 import * as http from "node:http";
 import { URL } from "node:url";
 import { createHash } from "node:crypto";
+import { execFile } from "node:child_process";
+import { createReadStream, createWriteStream, existsSync, mkdirSync, rmSync, statSync, readdirSync } from "node:fs";
+import * as os from "node:os";
+import * as path from "node:path";
 
 const PORT = Number(process.env.PORT || 3001);
 
@@ -313,6 +317,135 @@ async function getCid(bvid: string): Promise<number> {
   return cid;
 }
 
+const CACHE_DIR = path.join(os.tmpdir(), "needmusic-cloud-cache");
+// Keep transcoded files for at most ~1 hour; drain on demand so a busy free
+// tier stays within disk limits.
+const CACHE_TTL_MS = 60 * 60 * 1000;
+const CACHE_MAX_FILES = 24;
+
+function cachePath(bvid: string): string {
+  return path.join(CACHE_DIR, `${bvid}.mp3`);
+}
+
+function ensureCacheDir(): void {
+  mkdirSync(CACHE_DIR, { recursive: true });
+}
+
+function pruneCache(): void {
+  try {
+    const now = Date.now();
+    let files = readdirSync(CACHE_DIR)
+      .map((f) => {
+        const p = path.join(CACHE_DIR, f);
+        try { return { p, mtime: statSync(p).mtimeMs }; } catch { return null; }
+      })
+      .filter((x): x is { p: string; mtime: number } => x !== null)
+      .sort((a, b) => a.mtime - b.mtime);
+    // Drop expired entries.
+    for (const f of files) {
+      if (now - f.mtime > CACHE_TTL_MS) { try { rmSync(f.p); } catch { /* ignore */ } }
+    }
+    files = files.filter((f) => now - f.mtime <= CACHE_TTL_MS);
+    // Keep at most CACHE_MAX_FILES — evict the oldest.
+    while (files.length > CACHE_MAX_FILES) {
+      try { rmSync(files.shift()!.p); } catch { /* ignore */ }
+    }
+  } catch { /* ignore */ }
+}
+
+/** Download a URL to a temp file (streamed). Returns the local path. */
+async function downloadToFile(url: string, dest: string): Promise<string> {
+  const res = await fetch(url, {
+    headers: withCookie({
+      "User-Agent": USER_AGENT,
+      Referer: "https://www.bilibili.com/",
+    }),
+  });
+  if (!res.ok || !res.body) throw new Error(`download HTTP ${res.status}`);
+  const { pipeline } = await import("node:stream/promises");
+  await pipeline(
+    res.body as unknown as NodeJS.ReadableStream,
+    createWriteStream(dest)
+  );
+  return dest;
+}
+
+/**
+ * Transcode Bilibili's DASH audio to a browser-playable MP3 (works on iOS,
+ * matching how the desktop 'Save' converts with ffmpeg). Returns the MP3 path.
+ */
+async function getTranscoded(bvid: string, audioUrl: string): Promise<string> {
+  ensureCacheDir();
+  const out = cachePath(bvid);
+  if (existsSync(out)) return out;
+
+  // Download the raw DASH audio once, then transcode to MP3.
+  const raw = path.join(CACHE_DIR, `${bvid}.raw`);
+  try {
+    await downloadToFile(audioUrl, raw);
+    await runFfmpeg(raw, out);
+    return out;
+  } finally {
+    try { rmSync(raw); } catch { /* ignore */ }
+  }
+}
+
+/** ffmpeg -y -i <in> -vn -c:a libmp3lame -q:a 2 <out>.mp3  (same as the desktop). */
+function runFfmpeg(input: string, output: string): Promise<void> {
+  return new Promise((resolve, reject) => {
+    const ffmpeg = process.env.FFMPEG_PATH || "ffmpeg";
+    execFile(
+      ffmpeg,
+      ["-y", "-i", input, "-map_metadata", "0", "-vn", "-c:a", "libmp3lame", "-q:a", "2", output],
+      { timeout: 120_000 }, // free-tier CPU is slow; generous cap
+      (err) => {
+        if (err) reject(new Error("ffmpeg transcode failed: " + (err.message || String(err))));
+        else resolve();
+      }
+    );
+  });
+}
+
+/** Serve a local MP3 file with Range support (html5 <audio>/<video> seeking). */
+function serveFile(cdn: http.ServerResponse, file: string): void {
+  let size: number;
+  try { size = statSync(file).size; } catch {
+    cdn.statusCode = 404;
+    cdn.end("transcoded file not available");
+    return;
+  }
+
+  setCors(cdn);
+  cdn.setHeader("Content-Type", "audio/mpeg");
+  cdn.setHeader("Accept-Ranges", "bytes");
+
+  const rangeHeader = cdn.req.headers.range;
+  let start = 0;
+  let end = size - 1;
+  let code = 200;
+  if (rangeHeader) {
+    const m = /^bytes=(\d*)-(\d*)$/.exec(rangeHeader.trim());
+    if (m && (m[1] || m[2])) {
+      start = m[1] ? parseInt(m[1], 10) : size - parseInt(m[2] || "0", 10);
+      if (isNaN(start) || start < 0) start = 0;
+      if (start >= size) {
+        cdn.statusCode = 416;
+        cdn.setHeader("Content-Range", `bytes */${size}`);
+        cdn.end();
+        return;
+      }
+      end = m[1] && m[2] ? (parseInt(m[2], 10) < size - 1 ? parseInt(m[2], 10) : size - 1) : size - 1;
+      code = 206;
+      cdn.setHeader("Content-Range", `bytes ${start}-${end}/${size}`);
+    }
+  }
+  cdn.statusCode = code;
+  cdn.setHeader("Content-Length", (end - start + 1).toString());
+  const stream = createReadStream(file, { start, end });
+  stream.pipe(cdn);
+  cdn.on("close", () => stream.destroy());
+}
+
 async function streamAudio(cdn: http.ServerResponse, bvid: string): Promise<void> {
   // 1) cid (required to get streams).
   const cid = await getCid(bvid);
@@ -374,68 +507,17 @@ async function streamAudio(cdn: http.ServerResponse, bvid: string): Promise<void
     return;
   }
 
-  // 4) Proxy the Bilibili stream (Range-aware so HTML5 seeking works).
-  const range = cdn.req.headers.range;
-  const upstreamHeaders: Record<string, string> = {
-    "User-Agent": USER_AGENT,
-    Referer: `https://www.bilibili.com/video/${bvid}`,
-  };
-  if (range) upstreamHeaders.Range = range as string;
-  if (sessionCookie) upstreamHeaders.Cookie = sessionCookie;
-
-  const upstream = await fetch(audioUrl, { headers: upstreamHeaders });
-  if (upstream.status !== 200 && upstream.status !== 206) {
+  // 4) Download + transcode to MP3 (browser/iOS-playable), then serve it.
+  pruneCache();
+  let mp3: string;
+  try {
+    mp3 = await getTranscoded(bvid, audioUrl);
+  } catch (e: any) {
     cdn.statusCode = 502;
-    cdn.end("upstream rejected the stream request");
+    cdn.end(`transcode failed: ${(e && e.message) || e}`);
     return;
   }
-
-  cdn.statusCode = upstream.status === 206 ? 206 : 200;
-  const ct = upstream.headers.get("content-type") || "audio/mp4";
-  cdn.setHeader("Content-Type", ct);
-  cdn.setHeader("Accept-Ranges", "bytes");
-  const contentLength = upstream.headers.get("content-length");
-  if (contentLength) cdn.setHeader("Content-Length", contentLength);
-  const contentRange = upstream.headers.get("content-range");
-  if (contentRange) cdn.setHeader("Content-Range", contentRange);
-  setCors(cdn);
-
-  await dpipe(upstream.body as any, cdn);
-}
-
-// Minimal node-to-node response streamer (avoids depending on stream internals).
-function dpipe(src: any, dest: http.ServerResponse): Promise<void> {
-  return new Promise((resolve, reject) => {
-    if (!src) {
-      dest.end();
-      resolve();
-      return;
-    }
-    if (typeof src.pipe === "function") {
-      // Node IncomingMessage-style stream.
-      src.pipe(dest);
-      src.on("end", () => resolve());
-      src.on("error", (e: any) => reject(e));
-    } else {
-      // Web-standard ReadableStream (fetch in Node >=18 returns this).
-      const reader = (src as ReadableStream).getReader();
-      const pump = () => {
-        reader
-          .read()
-          .then(({ done, value }) => {
-            if (done) {
-              dest.end();
-              resolve();
-            } else {
-              dest.write(Buffer.from(value));
-              pump();
-            }
-          })
-          .catch(reject);
-      };
-      pump();
-    }
-  });
+  serveFile(cdn, mp3);
 }
 
 // ─── CORS ────────────────────────────────────────────
