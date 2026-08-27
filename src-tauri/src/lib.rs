@@ -14,6 +14,7 @@ mod discord_rpc;
 mod online;
 mod lan_server;
 mod updater;
+mod google_oauth;
 
 pub use scanner::LibraryScanner;
 pub use concurrency::ConcurrencyGate;
@@ -22,6 +23,7 @@ pub use audio_eq::{Equalizer, EqBand, EqPreset, EQ_PRESETS};
 pub use discord_rpc::DiscordRpcManager;
 pub use online::{OnlineTrackResult, OnlineSearchResult, CombinedSearchResult};
 pub use lan_server::{LanServer, LanTrack, LanPlaylist};
+use google_oauth::{google_oauth_start, google_oauth_poll, google_oauth_clear};
 
 pub struct AppState {
     pub scanner: Mutex<LibraryScanner>,
@@ -1217,6 +1219,9 @@ pub fn run() {
             debug_scan,
             test_parse_m4a,
             write_track_metadata,
+            google_oauth_start,
+            google_oauth_poll,
+            google_oauth_clear,
         ])
         .run(tauri::generate_context!())
         .expect("error while running NeedMusic");

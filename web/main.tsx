@@ -1,6 +1,10 @@
 import React from "react";
 import ReactDOM from "react-dom/client";
 import WebApp from "./WebApp";
+// Import for side effect: googleConfig calls setGoogleClientId() with the
+// configured CLIENT_ID (from .env or the hardcoded fallback). Because other
+// modules read the id from the shared drive layer, this must run at startup.
+import "./googleConfig";
 
 // Register the service worker so the app can be installed (PWA) and opened
 // offline from a secure origin (HTTPS, e.g. GitHub Pages). The LAN server

@@ -18,6 +18,11 @@ import {
   saveDownloadedAudio, getDownloadedAudio, removeDownloadedAudio, getAllDownloadedAudio,
 } from "./downloads";
 import { buildZip } from "./zip";
+import { downloadAudioFile } from "./GoogleDriveSync";
+import { useWebDriveSync } from "./useWebDriveSync";
+import GoogleDriveSyncPanel from "./GoogleDriveSyncPanel";
+import { loadPlaylists, savePlaylists, type WebPlaylist } from "./playlistsStore";
+import { songKeyOf, type SyncTrackMeta } from "@core/services/cloudsync";
 import "../src/ui/styles/design-tokens.css";
 import "../src/ui/styles/global.css";
 
@@ -273,6 +278,9 @@ const WebApp: React.FC = () => {
   const downloadedRef = useRef(new Map<string, string>());
   // Track id → detected real format (from the file's magic bytes).
   const downloadedFormatRef = useRef(new Map<string, string>());
+  // Live Drive access token, kept in a ref so the (memoized) play handler sees
+  // the current value after login instead of a stale closure from first render.
+  const driveTokenRef = useRef("");
   // Track id currently being downloaded (for UI feedback).
   const [downloadingId, setDownloadingId] = useState<string | null>(null);
   // Bumped whenever a downloaded copy is added/removed so status indicators
@@ -781,6 +789,27 @@ const WebApp: React.FC = () => {
       return;
     }
 
+    // 1) Drive-synced track (audio lives in another device's Drive upload).
+    //    Download it now and play from the downloaded blob.
+    if (td.audioUrl.startsWith("drive://")) {
+      const fileId = td.audioUrl.slice("drive://".length);
+      if (!fileId || !driveTokenRef.current) {
+        setPlayError(`Couldn't play "${td.title}": it was synced from another device via Drive. Sign in to Google Drive Sync and try again.`);
+        return;
+      }
+      try {
+        const buf = await downloadAudioFile(driveTokenRef.current, fileId);
+        const blobUrl = URL.createObjectURL(new Blob([buf]));
+        downloadedRef.current.set(td.id, blobUrl);
+        setDlVersion((v) => v + 1);
+        const isMp4 = isMp4FamilyTrack(td, downloadedFormatRef.current);
+        await engine.play({ ...toPlayableTrack(td), filePath: withMp4Hint(blobUrl, isMp4) } as any);
+      } catch (e: any) {
+        setPlayError(`Couldn't play "${td.title}" from Drive: ${(e && e.message) || e}`);
+      }
+      return;
+    }
+
     // 1) LAN-synced track: ensure it is saved on this device (download it).
     if (!downloadedRef.current.has(td.id)) {
       try {
@@ -825,21 +854,31 @@ const WebApp: React.FC = () => {
    */
   const handleOnlineSave = useCallback(async (item: any) => {
     const idOrUrl = item.source === "youtube" ? item.url : item.bvid;
-    let audioUrl: string;
-    // Cloud serves Bilibili only; YouTube always routes through the desktop LAN.
-    const useCloud = cloudUrl.trim().length > 0 && item.source === "bilibili";
-    if (useCloud) {
-      // Cloud streaming: pass the bvid's audio through the Render proxy.
-      audioUrl = `${cloudUrl.replace(/\/+$/, "")}/online/audio?id=${encodeURIComponent(idOrUrl)}`;
-    } else {
-      // Desktop LAN server downloads to its temp cache and streams the file.
-      audioUrl = lanApi(
-        lanUrl,
-        `/online/audio?source=${encodeURIComponent(item.source)}` +
-          `&id=${encodeURIComponent(idOrUrl)}` +
-          `&title=${encodeURIComponent(item.title)}` +
-          `&artist=${encodeURIComponent(item.author)}`
+    // Candidate audio sources, tried in order: cloud first, then the desktop
+    // LAN server. (YouTube from a cloud IP can be 403-blocked, so falling back
+    // to LAN when a cloud YouTube save fails matters.)
+    const candidates: string[] = [];
+    if (cloudUrl.trim()) {
+      candidates.push(
+        `${cloudUrl.replace(/\/+$/, "")}/online/audio` +
+          `?source=${encodeURIComponent(item.source)}` +
+          `&id=${encodeURIComponent(idOrUrl)}`
       );
+    }
+    if (lanUrl.trim()) {
+      candidates.push(
+        lanApi(
+          lanUrl,
+          `/online/audio?source=${encodeURIComponent(item.source)}` +
+            `&id=${encodeURIComponent(idOrUrl)}` +
+            `&title=${encodeURIComponent(item.title)}` +
+            `&artist=${encodeURIComponent(item.author)}`
+        )
+      );
+    }
+    if (candidates.length === 0) {
+      setOnlineSaveMsg({ ok: false, text: "No backend configured — enable Cloud Search or connect to your computer first." });
+      return;
     }
 
     const t: TrackData = {
@@ -857,25 +896,32 @@ const WebApp: React.FC = () => {
       hasArtwork: false,
       dateAdded: new Date(),
       isFavorite: false,
-      audioUrl,
+      audioUrl: candidates[0],
       sourceName: item.title,
     };
     // Add it to the local library so it shows up in the Tracks view.
     webTrackStore.addTrack(t);
     persistTracks(webTrackStore.getAll());
 
-    try {
-      setOnlineSaveMsg(null);
-      // force=true: always re-fetch the latest (MP3) stream and overwrite any
-      // stale cached copy from before the cloud started transcoding.
-      await downloadTrack(t, true);
-      setOnlineSaveMsg({ ok: true, text: `Saved "${item.title}" on this device — it can now be played.` });
-    } catch (e: any) {
-      // Roll back the store entry so it doesn't linger as a broken track.
-      webTrackStore.removeTrack(t.id);
-      persistTracks(webTrackStore.getAll());
-      setOnlineSaveMsg({ ok: false, text: `Couldn't save "${item.title}": ${(e && e.message) || e}.` });
+    let lastErr: unknown = null;
+    for (let i = 0; i < candidates.length; i++) {
+      t.audioUrl = candidates[i];
+      try {
+        setOnlineSaveMsg(null);
+        // force=true: always re-fetch the latest (MP3) stream and overwrite any
+        // stale cached copy from before the cloud started transcoding.
+        await downloadTrack(t, true);
+        const via = i === 0 && cloudUrl.trim() && candidates.length > 1 ? " (via cloud)" : "";
+        setOnlineSaveMsg({ ok: true, text: `Saved "${item.title}" on this device${via} — it can now be played.` });
+        return;
+      } catch (e) {
+        lastErr = e;
+      }
     }
+    // All backends failed — roll back so the track doesn't linger as broken.
+    webTrackStore.removeTrack(t.id);
+    persistTracks(webTrackStore.getAll());
+    setOnlineSaveMsg({ ok: false, text: `Couldn't save "${item.title}": ${(lastErr && (lastErr as Error).message) || lastErr}.` });
   }, [cloudUrl, lanUrl, downloadTrack, persistTracks]);
 
   const handleToggleFavorite = useCallback((td: TrackData) => {
@@ -905,6 +951,72 @@ const WebApp: React.FC = () => {
     const all = webTrackStore.getAll();
     persistTracks(all);
   }, [persistTracks, player.currentTrack, engine]);
+
+  // ── Google Drive cross-device sync ────────────────
+  // Applies synced favorites from Drive onto the store + React state, matching
+  // by cross-device song key (mirrors how LAN favorites are applied).
+  const onSetFavoritesFromDrive = useCallback((favoritesSongKeys: Set<string>) => {
+    if (!favoritesSongKeys.size) return;
+    let changed = false;
+    for (const t of webTrackStore.getAll()) {
+      if (favoritesSongKeys.has(songKeyOf(t)) && !t.isFavorite) {
+        t.isFavorite = true;
+        changed = true;
+      }
+    }
+    if (changed) {
+      persistTracks(webTrackStore.getAll());
+    }
+  }, [persistTracks]);
+
+  // Inject tracks synced from another device (their audio lives in Drive) into
+  // the web library so they appear in the list; audioUrl uses a `drive://<fileId>`
+  // marker resolved to a real blob at play time (see handleDrivePlayback).
+  const onApplyDriveTracks = useCallback((driveTracks: SyncTrackMeta[]) => {
+    if (!driveTracks.length) return;
+    let added = 0;
+    for (const m of driveTracks) {
+      if (!m.driveFileId) continue;
+      if (webTrackStore.getById(`drive-${m.songKey}`)) continue;
+      const t: TrackData = {
+        id: `drive-${m.songKey}`,
+        title: m.title,
+        artist: m.artist,
+        album: m.album,
+        albumArtist: m.albumArtist || m.artist,
+        durationSecs: m.durationSecs || 0,
+        trackNumber: null,
+        discNumber: null,
+        genre: m.genre || "",
+        year: m.year ?? null,
+        codec: m.codec || "mp3",
+        hasArtwork: false,
+        dateAdded: new Date(),
+        isFavorite: m.isFavorite,
+        audioUrl: `drive://${m.driveFileId}`,
+        sourceName: `${m.title} (Drive)`,
+      };
+      webTrackStore.addTrack(t);
+      added++;
+    }
+    if (added > 0) {
+      persistTracks(webTrackStore.getAll());
+    }
+  }, [persistTracks]);
+
+  const driveSync = useWebDriveSync({
+    ready,
+    tracks,
+    onSetFavorites: onSetFavoritesFromDrive,
+    onPlaylistsMerged: () => { /* playlists already stored via savePlaylists; state re-read in view */ },
+    onDriveTracks: onApplyDriveTracks,
+  });
+
+  // Keep the live Drive token in a ref so the memoized play handler always sees
+  // the current value after login (avoids stale-closure "sign in again" errors).
+  useEffect(() => {
+    driveTokenRef.current = driveSync.token;
+  }, [driveSync.token]);
 
   // ── Splash / Error ────────────────────────────────
   if (error) return (
@@ -1064,29 +1176,41 @@ const WebApp: React.FC = () => {
                 <QueuePanel libraryTracks={queuePanelTracks} />
               </div>
             ) : activeTab === "Settings" ? (
-              <WebSettingsView
-                lanUrl={lanUrl}
-                cloudUrl={cloudUrl}
-                onCloudChange={(url) => {
-                  setCloudUrl(url);
-                  try {
-                    if (url) localStorage.setItem("needmusic:cloudUrl", url);
-                    else localStorage.removeItem("needmusic:cloudUrl");
-                  } catch { /* ignore */ }
-                }}
-                onConnect={(url) => {
-                  setLanUrl(url);
-                  try { localStorage.setItem("needmusic:lanUrl", url); } catch { /* ignore */ }
-                  setTracks(webTrackStore.getAll());
-                }}
-                onDisconnect={() => {
-                  setLanUrl("");
-                  setLanStatus(null);
-                  try { localStorage.removeItem("needmusic:lanUrl"); } catch { /* ignore */ }
-                }}
-                syncLibrary={syncLanLibrary}
-                autoStatus={lanStatus}
-              />
+              <>
+                <GoogleDriveSyncPanel
+                  signedIn={driveSync.signedIn}
+                  account={driveSync.account}
+                  status={driveSync.status}
+                  hasConfig={driveSync.hasConfig}
+                  onSignIn={driveSync.signIn}
+                  onSignOut={driveSync.signOut}
+                  onRunSync={driveSync.runSync}
+                  onOpenGuide={() => { try { window.open("https://github.com/Revampes/NeedMusic/blob/main/docs/google-drive-sync.md", "_blank"); } catch { /* ignore */ } }}
+                />
+                <WebSettingsView
+                  lanUrl={lanUrl}
+                  cloudUrl={cloudUrl}
+                  onCloudChange={(url) => {
+                    setCloudUrl(url);
+                    try {
+                      if (url) localStorage.setItem("needmusic:cloudUrl", url);
+                      else localStorage.removeItem("needmusic:cloudUrl");
+                    } catch { /* ignore */ }
+                  }}
+                  onConnect={(url) => {
+                    setLanUrl(url);
+                    try { localStorage.setItem("needmusic:lanUrl", url); } catch { /* ignore */ }
+                    setTracks(webTrackStore.getAll());
+                  }}
+                  onDisconnect={() => {
+                    setLanUrl("");
+                    setLanStatus(null);
+                    try { localStorage.removeItem("needmusic:lanUrl"); } catch { /* ignore */ }
+                  }}
+                  syncLibrary={syncLanLibrary}
+                  autoStatus={lanStatus}
+                />
+              </>
             ) : (
               <>
                 {tracks.length > 0 && (
@@ -1786,9 +1910,9 @@ const WebOnlineSearch: React.FC<{
   };
 
   const play = (item: any) => {
-    // Save-then-play: the parent handler picks the right backend (cloud for
-    // Bilibili, LAN for YouTube) and downloads it to this device, where iOS
-    // can play it reliably.
+    // Save-then-play: the parent handler downloads the item to this device
+    // (cloud for both sources, LAN as fallback), where iOS can play it
+    // reliably.
     onSave(item);
   };
 
@@ -1797,7 +1921,7 @@ const WebOnlineSearch: React.FC<{
       <div className="online-search-bar">        <input
           className="online-search-input"
           type="text"
-          placeholder={hasCloud || hasLan ? "Search Bilibili (YouTube via LAN)…" : "Search online music…"}
+          placeholder={hasCloud || hasLan ? "Search Bilibili + YouTube…" : "Search online music…"}
           value={q}
           onChange={(e) => setQ(e.target.value)}
           onKeyDown={(e) => { if (e.key === "Enter") search(); }}
@@ -1882,19 +2006,6 @@ function formatDuration(secs: number): string {
 }
 
 // ─── Web Playlists (localStorage-based, no Tauri DB) ──
-
-interface WebPlaylist {
-  id: string;
-  name: string;
-  trackIds: string[];
-}
-
-function loadPlaylists(): WebPlaylist[] {
-  try { return JSON.parse(localStorage.getItem("needmusic:playlists") || "[]"); } catch { return []; }
-}
-function savePlaylists(pl: WebPlaylist[]): void {
-  localStorage.setItem("needmusic:playlists", JSON.stringify(pl));
-}
 
 /**
  * Merge playlists received from the desktop LAN server into the local store.

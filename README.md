@@ -185,16 +185,45 @@ tiny **`cloud/`** proxy to [Render's free tier](https://render.com) in ~5 minute
    **Enable**. Online search now tries the **cloud first**, and falls back to
    your computer's **LAN server** whenever the cloud is unreachable.
 
-The cloud service is **Bilibili-only** and lightweight by design — see
+The cloud service is **Bilibili + YouTube** and lightweight by design — see
 [`cloud/README.md`](cloud/README.md). It serves search results and, when you
 tap **Save**, downloads + transcodes the audio to MP3 (via ffmpeg) so the track
 plays on any phone, including iOS Safari — mirroring what the desktop's "Save"
-does. YouTube is intentionally not on the cloud (it needs `yt-dlp` and heavy
-bandwidth); YouTube search/download still works on the desktop/LAN.
+does. YouTube runs through **yt-dlp** on the cloud; because YouTube throttles
+datacenter/cloud IPs, a *specific* YouTube download from the cloud can be
+blocked ("sign in to confirm you're not a bot") — the phone then falls back to
+the desktop LAN server, which has the cookies/history to download it reliably.
+Bilibili has no such block and is the primary cloud use-case.
 
 > **Free-tier note:** Render's free service sleeps after ~15 min idle; the first
 > search after that takes ~15–50s to cold-start, then runs normally. The cloud is
 > public (no auth) — anyone with your URL can issue searches, so keep it personal.
+
+### ☁️ Google Drive Sync (optional) — favorites & playlists across devices
+
+Sync your favorites and playlists between the desktop app and the web player (and any
+device) using your **own Google Drive** as a free, user-owned backend — no NeedMusic
+account or servers.
+
+- **Sign in with Google** in **Settings → Google Drive Sync** — available in *both*
+  the desktop app and the web player.
+- Favorites and playlists are stored privately in Google Drive's hidden
+  **`appDataFolder`**, using only the non-sensitive `drive.appdata` scope.
+- Merge is automatic and **cross-device**: a song is matched by a normalized
+  **song key** (`artist|title|album|duration`) rather than by internal id, so the
+  desktop and web apps reconcile the same song cleanly. Only metadata syncs —
+  never audio files.
+- **Set up once:** register a Google Cloud OAuth web client, enable the Drive API,
+  get a `CLIENT_ID`, and add authorized *JavaScript origins* `http://localhost:3000`
+  (web dev) and `http://localhost:1420` (desktop dev), plus the desktop OAuth
+  *redirect URI* `http://127.0.0.1:8543/oauth_callback`.
+
+```bash
+# set your client id (built from Vite env, or paste in web/googleConfig.ts)
+export VITE_GOOGLE_CLIENT_ID=1234567890-yourclientid.apps.googleusercontent.com
+```
+
+Full walkthrough → **[docs/google-drive-sync.md](docs/google-drive-sync.md)**.
 
 ---
 
@@ -203,11 +232,12 @@ bandwidth); YouTube search/download still works on the desktop/LAN.
 NeedMusic is built with privacy as a core principle:
 
 - **No telemetry.** NeedMusic does **not** collect, report, or send any usage data, analytics, or crash reports anywhere. There is no first-party backend server operated by NeedMusic.
-- **No accounts.** There is no login, no user registration, and no cloud sync. Everything lives on your machine.
+- **No mandatory accounts.** There is no login, no user registration, and nothing is synced without you choosing to. Everything lives on your machine by default.
 - **Local-first storage.** Your music library metadata, playlists, favorites, and settings are stored exclusively in a **local SQLite database** (`needmusic.db`) on your computer. In the web build, data is stored in your browser's `localStorage`.
-- **Online search transparency.** When you use the Bilibili search feature, search queries are sent directly from your machine to `api.bilibili.com`. NeedMusic does not proxy, intercept, or log these requests. *(If you **optionally** enable Cloud Search in the web app, queries first go to the `cloud/` proxy you choose to host on Render, which then calls Bilibili — only search text is passed, and the proxy logs nothing.)*
+- **User-owned sync (optional).** If you enable **Google Drive Sync**, favorites/playlists are written to **your** Google Drive's private `appDataFolder` (non-sensitive `drive.appdata` scope) and pulled by whatever device you sign into. Google — not NeedMusic — hosts that data; you can revoke access anytime from your Google account. No audio is ever uploaded.
+- **Online search transparency.** When you use the Bilibili search feature, search queries are sent directly from your machine to `api.bilibili.com`. NeedMusic does not proxy, intercept, or log these requests. *(If you **optionally** enable Cloud Search in the web app, queries go to the `cloud/` proxy you host on Render, which then calls Bilibili and YouTube — only search/download-of-a-track-you-picked is passed, and the proxy logs nothing.)*
 - **Discord Rich Presence.** When enabled, track information (title, artist, album) is sent to your **local Discord client** via named pipe IPC — it never leaves your machine. Disable it anytime from Settings.
-- **No network requests at startup.** The app makes zero outbound connections unless you explicitly use the online search feature or enable Discord Rich Presence.
+- **No network requests at startup.** The app makes no outbound *data* requests unless you use online search, Discord Rich Presence, or (optionally, only when you sign in) Google Drive Sync. When a Google CLIENT_ID is configured, the web build may load Google's Identity Services script — it makes no API calls until you sign in.
 
 ---
 

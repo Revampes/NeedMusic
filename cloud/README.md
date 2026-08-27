@@ -1,11 +1,12 @@
 # NeedMusic Cloud Proxy
 
-A small, free-tier–friendly web service that lets **phone users run Bilibili
-online search even when their computer (and the LAN server) is unreachable.**
+A small, free-tier–friendly web service that lets **phone users run online
+search even when their computer (and the LAN server) is unreachable.**
 
-It is a **search-only** proxy: it takes a query, asks Bilibili's public API,
-and returns results in the same shape the desktop app uses. It does **not**
-download files, does **not** do YouTube, and has no accounts or persistence.
+It is a **search + playback proxy**: it takes a query, asks **Bilibili's public
+API** and **YouTube (via yt-dlp)**, and returns results in the same shape the
+desktop app uses. When the phone taps **Save**, the cloud downloads that video's
+audio, transcodes it to MP3 (ffmpeg), and streams it back — no computer needed.
 
 - How the web app uses it: it is one optional input in the phone app's
   **Settings → Cloud Search**. When set, online search tries the cloud first
@@ -13,10 +14,13 @@ download files, does **not** do YouTube, and has no accounts or persistence.
 - What it never does: it stores nothing, logs nothing, and answers every
   request the same way a public read-only API does.
 
-> **Why Bilibili-only?** The cloud intentionally skips YouTube. YouTube search
-> needs `yt-dlp` + `ffmpeg` and heavy `bandwidth/CPU` (both download+transcode),
-> which the free tier can't sustain — and proxying YouTube audio for many users
-> is legally/ethically risky. The desktop LAN server still provides YouTube.
+> **Honest caveat about YouTube on the cloud:** YouTube actively throttles
+> datacenter/cloud IPs. yt-dlp **search** (flat-playlist) usually works, but
+> **audio extraction** for a given video can fail with *"Sign in to confirm
+> you're not a bot"* (HTTP 403) — especially without a cookies file. When that
+> happens the cloud returns a clean error and the phone falls back to the
+> desktop LAN server, which has cookies/history and is far more reliable for
+> YouTube downloads. Bilibili has no such block and is the primary use case.
 
 ---
 
@@ -36,16 +40,20 @@ curl "http://localhost:3001/health"                            # → ok
 curl "http://localhost:3001/online/search?q=周杰伦"              # → JSON results
 ```
 
-The audio endpoint `/online/audio?id=BVxxxxx` **downloads the video's audio and
-transcodes it to MP3 with ffmpeg** before serving it back — a plain MP3 plays on
-any phone browser, including iOS Safari (which refuses the raw fMP4 that
-Bilibili serves). Transcoded files are cached per video for ~1 hour, so repeat
-plays/seek requests don't re-transcode. It requires **ffmpeg** on `PATH` (or
-`FFMPEG_PATH`). If a video honestly has no accessible audio, it returns a clean
-HTTP error and the web app shows what failed.
+The audio endpoint `/online/audio?id=BVxxxxx` (Bilibili) or
+`/online/audio?source=youtube&id=<videoIdOrUrl>` (YouTube) **downloads the
+video's audio and transcodes it to MP3 with ffmpeg** before serving it back — a
+plain MP3 plays on any phone browser, including iOS Safari (which refuses the
+raw fMP4 that Bilibili serves). Transcoded files are cached per video for ~1
+hour, so repeat plays/seek requests don't re-transcode. It requires **ffmpeg**
+on `PATH` (or `FFMPEG_PATH`) and **yt-dlp** on `PATH` (or `YTDLP_PATH`) for the
+YouTube path. If a video honestly has no accessible audio — or YouTube's
+anti-bot blocks the cloud IP — it returns a clean HTTP error and the web app
+shows what failed.
 
 The `cloud/` dev deps include `ffmpeg-static`, so `npm install && npm start`
-works locally even without a system ffmpeg; the server auto-detects it.
+works locally even without a system ffmpeg; the server auto-detects it. yt-dlp
+falls back to `python -m yt_dlp` when no `yt-dlp` binary is installed.
 
 ---
 
@@ -90,6 +98,7 @@ works locally even without a system ffmpeg; the server auto-detects it.
 |--------------|----------|-----------------------------------------------------------------------------------------------|
 | `PORT`       | `3001`   | Port Render assigns. Your Dockerfile + `render.yaml` already set it.                          |
 | `FFMPEG_PATH`| `ffmpeg` | Full path to an ffmpeg binary. On Render it's installed via apt; set this only for custom setups. |
+| `YTDLP_PATH` | `yt-dlp` | Full path to a yt-dlp binary. On Render it's installed via pip; set this only for custom setups. |
 
 No other config is needed. Transcoding is essential for iOS playback, so the
-cloud image bundles ffmpeg (see the `Dockerfile`).
+cloud image bundles ffmpeg + yt-dlp (see the `Dockerfile`).

@@ -307,6 +307,26 @@ export class DatabaseManager {
     );
   }
 
+  /**
+   * Replace a playlist's membership wholesale with the given ordered track ids
+   * (used by cross-device sync so a folder's contents reflect the cloud copy).
+   * Safe for custom playlists; should NOT be used on `__favorites__`.
+   */
+  async replacePlaylistTracks(playlistId: string, trackIds: TrackId[]): Promise<void> {
+    await this.ensureDb();
+    await this.db!.execute(
+      "DELETE FROM playlist_tracks WHERE playlist_id = $1",
+      [playlistId]
+    );
+    let pos = 0;
+    for (const trackId of trackIds) {
+      await this.db!.execute(
+        "INSERT OR IGNORE INTO playlist_tracks (playlist_id, track_id, position) VALUES ($1, $2, $3)",
+        [playlistId, trackId, pos++]
+      );
+    }
+  }
+
   async getPlaylistTracks(playlistId: string): Promise<Track[]> {
     await this.ensureDb();
     const rows: any[] = await this.db!.select(

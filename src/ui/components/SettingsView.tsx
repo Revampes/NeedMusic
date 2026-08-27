@@ -8,8 +8,12 @@ import { Track } from "@core/models/Track";
 import { IconFolder, IconVolume, IconPalette, IconSettings, IconRocket, IconCheck, IconAlert } from "@ui/components/Icons";
 import EqSettings from "@ui/components/EqSettings";
 import HotkeySettings from "@ui/components/HotkeySettings";
+import GoogleDriveSyncPanel from "@ui/components/GoogleDriveSyncPanel";
 
-interface Props { onTracksLoaded: (tracks: Track[]) => void; }
+interface Props {
+  onTracksLoaded: (tracks: Track[]) => void;
+  driveSync?: React.ComponentProps<typeof GoogleDriveSyncPanel>;
+}
 type Settings = Record<string, string>;
 
 interface CacheInfo {
@@ -46,7 +50,7 @@ const BACKGROUND_STYLES = [
   { value: "custom", label: "Custom" },
 ];
 
-const SettingsView: React.FC<Props> = ({ onTracksLoaded }) => {
+const SettingsView: React.FC<Props> = ({ onTracksLoaded, driveSync }) => {
   const [settings, setSettings] = useState<Settings>(DEFAULTS);
   const [scanPath, setScanPath] = useState("");
   const [scanning, setScanning] = useState(false);
@@ -482,6 +486,20 @@ const SettingsView: React.FC<Props> = ({ onTracksLoaded }) => {
           </div>
         )}
       </section>
+
+      {/* ── Google Drive Sync (cross-device) ── */}
+      {driveSync && (
+        <GoogleDriveSyncPanel
+          signedIn={driveSync.signedIn}
+          account={driveSync.account}
+          status={driveSync.status}
+          hasConfig={driveSync.hasConfig}
+          onSignIn={driveSync.onSignIn}
+          onSignOut={driveSync.onSignOut}
+          onRunSync={driveSync.onRunSync}
+          onOpenGuide={driveSync.onOpenGuide}
+        />
+      )}
 
       {/* ── LAN Sync (experimental) ── */}
       <section><h3><IconSettings size={16} style={{ marginRight: 6 }} />LAN Sync <span style={{ fontSize:10, color:"var(--text-tertiary)", fontWeight:400 }}>(experimental)</span></h3>

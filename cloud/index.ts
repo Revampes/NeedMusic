@@ -5,14 +5,21 @@
  * online search WITHOUT being connected to the desktop's LAN server.
  *
  * Endpoints (all CORS-enabled for browsers, all no-auth — search is public):
- *   GET /online/search?q=...  → Bilibili search (Wbi-signed), JSON
- *   GET /online/audio?id=...  → stream the matching Bilibili video audio
+ *   GET /online/search?q=...  → Bilibili (Wbi-signed) + YouTube (yt-dlp) search, JSON
+ *   GET /online/audio?id=...&source=bilibili|youtube
+ *                             → transcode + stream the matching audio as MP3
  *   GET /health               → tiny liveness probe (Render free tier pings this)
  *   GET /                     → JSON banner
  *
- * Only Bilibili is proxied here. YouTube is intentionally NOT provided on the
- * cloud (it would need yt-dlp + ffmpeg + heavy CPU/bandwidth, which the free
- * tier can't sustain); phone YouTube search stays on the desktop LAN server.
+ * Bilibili is queried through its public API (Wbi-signed); YouTube is queried
+ * with the yt-dlp CLI (installed in the Docker image). Both audio paths
+ * transcode to MP3 with ffmpeg so the phone (incl. iOS Safari) can play them.
+ *
+ * Honest caveats: YouTube actively throttles datacenter/cloud IPs — search via
+ * yt-dlp's flat-playlist usually works, but *audio extraction* for a given
+ * video can fail with a "Sign in to confirm you're not a bot" (HTTP 403),
+ * especially without a cookies file. When that happens the cloud reports a
+ * clean error and the desktop LAN server remains the fallback.
  *
  * The desktop LAN server remains the fallback when no cloud URL is configured
  * or the cloud is unreachable.
@@ -520,6 +527,186 @@ async function streamAudio(cdn: http.ServerResponse, bvid: string): Promise<void
   serveFile(cdn, mp3);
 }
 
+// ─── YouTube (yt-dlp) ────────────────────────────────
+
+/**
+ * Resolve the yt-dlp executable. Tries, in order:
+ *   $YTDLP_PATH → `yt-dlp` on PATH → `python -m yt_dlp` → `python3 -m yt_dlp`.
+ * The Render image installs a real `yt-dlp` binary, so the first candidate
+ * usually wins there; the python fallbacks make local dev work without one.
+ */
+let ytDlpCmd: string[] | null = null;
+async function resolveYtDlp(): Promise<string[]> {
+  if (ytDlpCmd) return ytDlpCmd;
+  const candidates: string[][] = [];
+  if (process.env.YTDLP_PATH) candidates.push([process.env.YTDLP_PATH]);
+  candidates.push(["yt-dlp"]);
+  if (process.env.PYTHON_PATH) candidates.push([process.env.PYTHON_PATH, "-m", "yt_dlp"]);
+  candidates.push(["python", "-m", "yt_dlp"]);
+  candidates.push(["python3", "-m", "yt_dlp"]);
+  for (const c of candidates) {
+    try {
+      await new Promise<void>((resolve, reject) => {
+        execFile(c[0], [...c.slice(1), "--version"], { timeout: 20_000 }, (err) =>
+          err ? reject(err) : resolve()
+        );
+      });
+      ytDlpCmd = c;
+      return c;
+    } catch { /* try the next candidate */ }
+  }
+  throw new Error(
+    "yt-dlp is required for YouTube search/audio. Install it (pip install yt-dlp) or set YTDLP_PATH."
+  );
+}
+
+/** Run yt-dlp with args; resolves stdout, rejects with stderr on failure. */
+function runYtDlp(args: string[], timeoutMs = 90_000): Promise<string> {
+  return new Promise((resolve, reject) => {
+    resolveYtDlp()
+      .then((cmd) => {
+        execFile(
+          cmd[0],
+          [...cmd.slice(1), ...args],
+          { timeout: timeoutMs, maxBuffer: 16 * 1024 * 1024 },
+          (err, stdout, stderr) => {
+            if (err) {
+              const msg = (stderr || "").trim() || (stdout || "").trim() || err.message;
+              reject(new Error(`yt-dlp error: ${msg}`));
+              return;
+            }
+            resolve((stdout || "").toString());
+          }
+        );
+      })
+      .catch(reject);
+  });
+}
+
+/** Extract the 11-char video id from a YouTube URL (or accept a bare id). */
+function extractYoutubeId(url: string): string | null {
+  const bare = url.trim();
+  if (/^[A-Za-z0-9_-]{11}$/.test(bare)) return bare;
+  const m = /[?&]v=([A-Za-z0-9_-]{11})/.exec(url);
+  if (m) return m[1];
+  for (const marker of ["youtu.be/", "/shorts/", "/embed/"]) {
+    const pos = url.indexOf(marker);
+    if (pos >= 0) {
+      const rest = url.slice(pos + marker.length).split(/[?&#]/)[0];
+      if (/^[A-Za-z0-9_-]{11}$/.test(rest)) return rest;
+    }
+  }
+  return null;
+}
+
+/** Search YouTube with yt-dlp's flat-playlist, mirroring the desktop. */
+async function searchYoutube(query: string): Promise<SearchResponse> {
+  const out = await runYtDlp([
+    `ytsearch20:${query} music audio`,
+    "--flat-playlist",
+    "--dump-json",
+    "--no-warnings",
+    "--no-check-certificate",
+    "--socket-timeout", "15",
+  ]);
+
+  const results: SearchItem[] = [];
+  for (const line of out.split("\n")) {
+    const t = line.trim();
+    if (!t) continue;
+    let j: any;
+    try { j = JSON.parse(t); } catch { continue; }
+    const id = j?.id;
+    if (!id) continue;
+
+    // Flat-playlist returns a "thumbnails" array (not a "thumbnail" string);
+    // take the last (highest-res) entry, then fall back to i.ytimg.com.
+    let cover = Array.isArray(j.thumbnails) && j.thumbnails.length
+      ? j.thumbnails[j.thumbnails.length - 1]?.url || ""
+      : "";
+    if (!cover && j.thumbnail) cover = j.thumbnail;
+    if (!cover) cover = `https://i.ytimg.com/vi/${id}/hqdefault.jpg`;
+
+    const dur = Number(j.duration) || 0;
+    results.push({
+      source: "youtube",
+      id,
+      bvid: id,
+      title: j.title || "Unknown",
+      author: j.uploader || j.channel || "Unknown",
+      duration: fmtSecs(dur),
+      duration_secs: dur,
+      cover_url: cover,
+      description: j.description || "",
+      url: j.webpage_url || j.url || `https://www.youtube.com/watch?v=${id}`,
+    });
+  }
+  return { results, total: results.length };
+}
+
+/** Cached MP3 path for a YouTube video id (namespaced away from bvids). */
+function cachePathYt(id: string): string {
+  return path.join(CACHE_DIR, `yt-${id}.mp3`);
+}
+
+/**
+ * Download a YouTube video's audio with yt-dlp, transcode to MP3 (same ffmpeg
+ * path as Bilibili), cache it, and serve it with Range support.
+ */
+async function streamYoutubeAudio(cdn: http.ServerResponse, urlOrId: string): Promise<void> {
+  const id = extractYoutubeId(urlOrId) || "";
+  if (!/^[A-Za-z0-9_-]{11}$/.test(id)) {
+    cdn.statusCode = 400;
+    cdn.end("invalid YouTube id/url");
+    return;
+  }
+  const url = /^https?:\/\//i.test(urlOrId)
+    ? urlOrId
+    : `https://www.youtube.com/watch?v=${id}`;
+
+  ensureCacheDir();
+  const out = cachePathYt(id);
+  if (existsSync(out)) { serveFile(cdn, out); return; }
+
+  // Download best audio into a scratch dir (no ffmpeg needed to pick a single
+  // format; we transcode to MP3 ourselves afterwards).
+  const scratch = path.join(CACHE_DIR, `yt-dl-${id}`);
+  mkdirSync(scratch, { recursive: true });
+  try {
+    await runYtDlp(
+      [
+        url,
+        "-f", "bestaudio[ext=m4a]/bestaudio[ext=opus]/bestaudio/best",
+        "-o", path.join(scratch, "%(id)s.%(ext)s"),
+        "--no-playlist",
+        "--no-warnings",
+        "--no-check-certificate",
+        "--socket-timeout", "30",
+        "-R", "3",
+        "--fragment-retries", "3",
+        "--no-post-overwrites",
+        "--no-part",
+      ],
+      240_000 // Python + ffmpeg on a free-tier CPU is slow; generous cap
+    );
+    const found = readdirSync(scratch).find((f) => f.startsWith(id) && !f.endsWith(".part"));
+    if (!found) {
+      cdn.statusCode = 502;
+      cdn.end("yt-dlp completed but the output file was not found");
+      return;
+    }
+    const raw = path.join(scratch, found);
+    pruneCache();
+    await runFfmpeg(raw, out);
+    serveFile(cdn, out);
+  } catch (e: any) {
+    cdn.statusCode = 502;
+    cdn.end(`YouTube audio failed: ${(e && e.message) || e}`);
+  } finally {
+    try { rmSync(scratch, { recursive: true, force: true }); } catch { /* ignore */ }
+  }
+}
+
 // ─── CORS ────────────────────────────────────────────
 
 function setCors(res: http.ServerResponse): void {
@@ -572,13 +759,22 @@ const server = http.createServer((req, res) => {
       sendJson(res, 400, { error: "missing q parameter" });
       return;
     }
-    searchBilibili(q.trim())
-      .then((data) =>
+    const query = q.trim();
+    // Run Bilibili and YouTube in parallel; a failure in one source must not
+    // kill the other (same tolerance as the desktop's combined search).
+    Promise.allSettled([searchBilibili(query), searchYoutube(query)])
+      .then(([bili, yt]) =>
         sendJson(res, 200, {
-          bilibili: data,
-          youtube: { results: [], total: 0 },
-          bilibili_error: null,
-          youtube_error: "YouTube search is only available on the desktop (LAN) — this cloud service is Bilibili-only.",
+          bilibili: bili.status === "fulfilled" ? bili.value : { results: [], total: 0 },
+          youtube: yt.status === "fulfilled" ? yt.value : { results: [], total: 0 },
+          bilibili_error:
+            bili.status === "rejected"
+              ? String((bili.reason && (bili.reason as Error).message) || bili.reason)
+              : null,
+          youtube_error:
+            yt.status === "rejected"
+              ? String((yt.reason && (yt.reason as Error).message) || yt.reason)
+              : null,
         })
       )
       .catch((e: any) => {
@@ -587,7 +783,7 @@ const server = http.createServer((req, res) => {
           bilibili: { results: [], total: 0 },
           youtube: { results: [], total: 0 },
           bilibili_error: String((e && e.message) || e),
-          youtube_error: "YouTube search is only available on the desktop (LAN) — this cloud service is Bilibili-only.",
+          youtube_error: null,
         });
       });
     return;
@@ -595,17 +791,28 @@ const server = http.createServer((req, res) => {
 
   if (path === "/online/audio") {
     const id = u.searchParams.get("id") ?? "";
+    const source = (u.searchParams.get("source") ?? "bilibili").toLowerCase();
     if (!id) {
       sendJson(res, 400, { error: "missing id parameter" });
       return;
     }
-    ensureCookie().then(() => streamAudio(res, id)).catch((e: any) => {
-      if (!res.headersSent) {
-        sendJson(res, 502, { error: String((e && e.message) || e) });
-      } else {
-        res.destroy();
-      }
-    });
+    if (source === "youtube") {
+      streamYoutubeAudio(res, id).catch((e: any) => {
+        if (!res.headersSent) {
+          sendJson(res, 502, { error: String((e && e.message) || e) });
+        } else {
+          res.destroy();
+        }
+      });
+    } else {
+      ensureCookie().then(() => streamAudio(res, id)).catch((e: any) => {
+        if (!res.headersSent) {
+          sendJson(res, 502, { error: String((e && e.message) || e) });
+        } else {
+          res.destroy();
+        }
+      });
+    }
     return;
   }
 

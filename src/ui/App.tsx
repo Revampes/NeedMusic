@@ -21,6 +21,11 @@ import CustomTitleBar from "@ui/components/CustomTitleBar";
 import QueuePanel from "@ui/components/QueuePanel";
 import LyricsPanel from "@ui/components/LyricsPanel";
 import MarqueeText from "@ui/components/MarqueeText";
+import { useDesktopDriveSync, configureDesktopGoogleClientId } from "@ui/useDesktopDriveSync";
+import { DESKTOP_GOOGLE_CLIENT_ID, DESKTOP_GOOGLE_CLIENT_SECRET } from "@core/services/cloudConfig";
+
+// Configure the desktop build's Google OAuth client id once at module load.
+configureDesktopGoogleClientId(DESKTOP_GOOGLE_CLIENT_ID);
 import { LyricsService, LyricLine, findCurrentLine } from "@core/services/LyricsService";
 import {
   IconLibrary, IconHeart, IconHeartFill, IconPlaylist, IconSettings,
@@ -96,6 +101,21 @@ const App: React.FC = () => {
     repeatMode: RepeatMode.Off, isShuffled: false, isFavorite: false, buffering: false,
   });
   const engine = useMemo(() => PlaybackEngine.getInstance(), []);
+  // Google Drive cross-device sync (desktop). Refreshes the library when cloud
+  // data is applied and bumps the playlist version so follow-up syncs see it.
+  const handleDriveSyncApplied = useCallback(async () => {
+    try { await LibraryManager.getInstance().reload(); } catch { /* keep current */ }
+    setTracks(LibraryManager.getInstance().getAllTracks());
+    setPlaylistVersion((v) => v + 1);
+  }, []);
+  const driveSync = useDesktopDriveSync({
+    ready,
+    tracks,
+    changeVersion: playlistVersion,
+    onSyncedApplied: handleDriveSyncApplied,
+    clientId: DESKTOP_GOOGLE_CLIENT_ID,
+    clientSecret: DESKTOP_GOOGLE_CLIENT_SECRET,
+  });
   const splashStartRef = useRef(performance.now());
   const keydownCleanupRef = useRef<(() => void) | null>(null);
   const hotkeyUnlistenRef = useRef<(() => void) | null>(null);
@@ -663,7 +683,23 @@ const App: React.FC = () => {
                  onTrackSaved={() => setTracks(LibraryManager.getInstance().getAllTracks())}
                />
              ) :
-             activeTab === "Settings" ? <SettingsView onTracksLoaded={setTracks} /> :
+             activeTab === "Settings" ? (
+               <SettingsView
+                 onTracksLoaded={setTracks}
+                 driveSync={{
+                   signedIn: driveSync.signedIn,
+                   account: driveSync.account,
+                   status: driveSync.status,
+                   hasConfig: driveSync.hasConfig,
+                   onSignIn: driveSync.signIn,
+                   onSignOut: driveSync.signOut,
+                   onRunSync: driveSync.runSync,
+                   onOpenGuide: () => {
+                     try { window.open("https://github.com/Revampes/NeedMusic/blob/main/docs/google-drive-sync.md", "_blank"); } catch { /* ignore */ }
+                   },
+                 }}
+               />
+             ) :
              <TrackListView tracks={filteredTracks} currentTrack={ct} onPlay={handlePlayTrack} onToggleFav={handleToggleFavorite} onRemove={handleRemoveTrack} onTitleChange={handleTitleChange} onPlaylistChanged={() => setPlaylistVersion((v) => v + 1)} />}
           </div>
         </div>

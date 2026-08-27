@@ -1,13 +1,21 @@
 # NeedMusic cloud proxy — runs on Render's free tier.
-# The server uses only Node built-ins (http, url, crypto, child_process) plus
-# ffmpeg (installed below) to transcode Bilibili's fMP4 DASH audio into a plain
-# MP3 that iOS Safari can actually play (the desktop does the same conversion).
+# The server uses only Node built-ins (http, url, crypto, child_process) plus:
+#   ffmpeg  → transcodes Bilibili DASH / YouTube audio into a plain MP3 that
+#             iOS Safari can actually play (the desktop does the same).
+#   yt-dlp  → YouTube search + audio extraction (Python CLI).
 FROM node:20-slim
 
-# ffmpeg: transcodes Bilibili DASH audio → MP3 (browser-playable, incl. iOS).
 RUN apt-get update \
-  && apt-get install -y --no-install-recommends ffmpeg \
-  && rm -rf /var/lib/apt/lists/*
+  && apt-get install -y --no-install-recommends \
+       ffmpeg \
+       python3 \
+       python3-pip \
+  && rm -rf /var/lib/apt/lists/* \
+  # yt-dlp for YouTube search/audio; --break-system-packages is needed on
+  # Debian bookworm+ (PEP 668). -U keeps the player-client impersonation
+  # fixes that dodge YouTube's cloud-IP bot checks.
+  && pip3 install --break-system-packages --no-cache-dir -U yt-dlp \
+  && yt-dlp --version
 
 WORKDIR /app
 

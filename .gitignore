@@ -10,3 +10,8 @@ src-tauri/target/
 
 # IDE
 .vscode/
+
+# Local environment (secrets) — keep committed .env.example
+.env
+.env.local
+.env.*.local
