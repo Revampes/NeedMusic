@@ -23,7 +23,7 @@ pub use audio_eq::{Equalizer, EqBand, EqPreset, EQ_PRESETS};
 pub use discord_rpc::DiscordRpcManager;
 pub use online::{OnlineTrackResult, OnlineSearchResult, CombinedSearchResult};
 pub use lan_server::{LanServer, LanTrack, LanPlaylist};
-use google_oauth::{google_oauth_start, google_oauth_poll, google_oauth_clear};
+use google_oauth::{google_oauth_start, google_oauth_poll, google_oauth_refresh, google_oauth_clear};
 
 pub struct AppState {
     pub scanner: Mutex<LibraryScanner>,
@@ -216,36 +216,64 @@ async fn read_audio_file(file_path: String) -> Result<String, String> {
     Ok(format!("data:{};base64,{}", mime, b64))
 }
 
+/// Write raw audio bytes (base64-encoded) to a file on disk, creating parent
+/// directories as needed. Used to materialize Drive-synced audio into the local
+/// library. Returns the resolved absolute path.
+#[tauri::command]
+async fn write_audio_file(file_path: String, data_base64: String) -> Result<String, String> {
+    use base64::Engine;
+    let bytes = base64::engine::general_purpose::STANDARD
+        .decode(&data_base64)
+        .map_err(|e| format!("Base64 decode error: {}", e))?;
+    let path = std::path::PathBuf::from(&file_path);
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).map_err(|e| format!("Create dir error: {}", e))?;
+    }
+    std::fs::write(&path, &bytes).map_err(|e| format!("Write error: {}", e))?;
+    Ok(path.to_string_lossy().to_string())
+}
+
 /// Toggle auto-start on Windows via registry.
-/// In debug mode also builds the frontend so standalone launch works.
+/// In debug mode the exe loads the Vite dev server URL (which is not running at
+/// login), so auto-start prefers the release exe whose frontend is embedded.
 #[tauri::command]
 async fn set_autostart(enable: bool) -> Result<(), String> {
     let exe = std::env::current_exe().map_err(|e| e.to_string())?;
     let exe_dir = exe.parent().unwrap_or_else(|| std::path::Path::new("."));
-    let path = exe.to_string_lossy().to_string();
 
     if enable {
-        // In debug mode, ensure frontend dist exists so standalone launch works.
-        #[cfg(debug_assertions)]
-        {
-            // Try to locate the project root (where package.json lives).
-            // The debug exe is at: src-tauri/target/debug/needmusic.exe
-            // Project root is 3 levels up.
-            let project_root = exe_dir.join("..").join("..").join("..");
-            let npm = if cfg!(target_os = "windows") { "npm.cmd" } else { "npm" };
-            let build = std::process::Command::new(npm)
-                .args(["run", "build"])
-                .current_dir(&project_root)
-                .output();
-            if let Err(ref e) = build {
-                eprintln!("[NeedMusic] autostart: npm run build failed: {}. Autostart may not work until you build manually.", e);
+        let path: String = {
+            #[cfg(debug_assertions)]
+            {
+                // Debug exe loads http://localhost:1420 (the Vite dev server),
+                // which isn't running when Windows starts, so it can't open on
+                // its own. Use the release exe (frontend embedded) for
+                // auto-start; if it hasn't been built yet, tell the user instead
+                // of registering an auto-start entry that can never work.
+                let release_exe = exe_dir.join("..").join("release").join("needmusic.exe");
+                if release_exe.exists() {
+                    release_exe.to_string_lossy().to_string()
+                } else {
+                    return Err(
+                        "Debug builds depend on the dev server and can't auto-start at login.\n\
+                         Run `npm run tauri build` once, then enable Start on login again."
+                            .to_string(),
+                    );
+                }
             }
-        }
+            #[cfg(not(debug_assertions))]
+            {
+                exe.to_string_lossy().to_string()
+            }
+        };
 
         let key = r"HKCU\Software\Microsoft\Windows\CurrentVersion\Run";
         let name = "NeedMusic";
+        // Quote the exe path — Windows Run keys fail silently on paths with
+        // spaces when they are not wrapped in quotes.
+        let quoted = format!("\"{}\"", path);
         std::process::Command::new("reg")
-            .args(["add", key, "/v", name, "/t", "REG_SZ", "/d", &path, "/f"])
+            .args(["add", key, "/v", name, "/t", "REG_SZ", "/d", &quoted, "/f"])
             .output()
             .map_err(|e| e.to_string())?;
     } else {
@@ -1164,6 +1192,7 @@ pub fn run() {
             extract_artwork,
             set_playback_state,
             read_audio_file,
+            write_audio_file,
             set_autostart,
             set_close_to_tray,
             set_window_blur,
@@ -1221,6 +1250,7 @@ pub fn run() {
             write_track_metadata,
             google_oauth_start,
             google_oauth_poll,
+            google_oauth_refresh,
             google_oauth_clear,
         ])
         .run(tauri::generate_context!())

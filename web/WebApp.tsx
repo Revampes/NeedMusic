@@ -11,11 +11,11 @@ import {
   IconMusic, IconImage, IconPrevious, IconPlay, IconPause, IconNext, IconStop,
   IconRepeatOff, IconRepeat, IconRepeatOne, IconShuffle, IconVolume,
   IconClock, IconPlus, IconClose, IconGlobe, IconSettings, IconUpload, IconAlert,
-  IconPlaylist, IconDownload, IconCheck, IconFolder,
+  IconPlaylist, IconDownload, IconCheck, IconFolder, IconLogin,
 } from "@ui/components/Icons";
 import { initWebPlayer, webTrackStore, toPlayableTrack, TrackData } from "./bootstrap";
 import {
-  saveDownloadedAudio, getDownloadedAudio, removeDownloadedAudio, getAllDownloadedAudio,
+  saveDownloadedAudio, getDownloadedAudio, removeDownloadedAudio, getAllDownloadedAudio, clearAllDownloadedAudio,
 } from "./downloads";
 import { buildZip } from "./zip";
 import { downloadAudioFile } from "./GoogleDriveSync";
@@ -281,6 +281,9 @@ const WebApp: React.FC = () => {
   // Live Drive access token, kept in a ref so the (memoized) play handler sees
   // the current value after login instead of a stale closure from first render.
   const driveTokenRef = useRef("");
+  // Live Drive run-sync, kept in a ref so delete handlers can force an immediate
+  // propagation (a deletion must reach Drive before the periodic pull re-adds it).
+  const driveRunSyncRef = useRef<(() => void) | null>(null);
   // Track id currently being downloaded (for UI feedback).
   const [downloadingId, setDownloadingId] = useState<string | null>(null);
   // Bumped whenever a downloaded copy is added/removed so status indicators
@@ -799,9 +802,12 @@ const WebApp: React.FC = () => {
       }
       try {
         const buf = await downloadAudioFile(driveTokenRef.current, fileId);
-        const blobUrl = URL.createObjectURL(new Blob([buf]));
+        const blob = new Blob([buf], { type: "audio/mpeg" });
+        const blobUrl = URL.createObjectURL(blob);
         downloadedRef.current.set(td.id, blobUrl);
         setDlVersion((v) => v + 1);
+        // Persist to IndexedDB so the download survives app restart (no re-download).
+        try { await saveDownloadedAudio(td.id, blob); } catch { /* storage full — this session only */ }
         const isMp4 = isMp4FamilyTrack(td, downloadedFormatRef.current);
         await engine.play({ ...toPlayableTrack(td), filePath: withMp4Hint(blobUrl, isMp4) } as any);
       } catch (e: any) {
@@ -929,6 +935,11 @@ const WebApp: React.FC = () => {
     webTrackStore.addTrack(td); // update in store
     const all = webTrackStore.getAll();
     persistTracks(all);
+    // Mark this song as favorite-touched on this device so the LWW sync honors
+    // both favoriting AND un-favoriting across devices.
+    driveSync.touchFavorite(songKeyOf(td));
+    // Push immediately so other devices see the change without waiting a cycle.
+    if (driveSync.signedIn) driveSync.runSync();
     if (player.currentTrack && (player.currentTrack as any).id === td.id) {
       setPlayer((p) => ({ ...p, isFavorite: td.isFavorite }));
     }
@@ -950,17 +961,30 @@ const WebApp: React.FC = () => {
     webTrackStore.removeTrack(td.id);
     const all = webTrackStore.getAll();
     persistTracks(all);
+    // If this was a drive-synced track, record an explicit deletion so it is
+    // removed from Drive and propagates to other devices.
+    if (td.id.startsWith("drive-")) {
+      driveSync.queueDeletion(td.id.slice("drive-".length));
+    }
+    // Immediately propagate the deletion to Drive so the periodic pull doesn't
+    // re-add it before it can sync out.
+    driveRunSyncRef.current?.();
   }, [persistTracks, player.currentTrack, engine]);
 
   // ── Google Drive cross-device sync ────────────────
   // Applies synced favorites from Drive onto the store + React state, matching
   // by cross-device song key (mirrors how LAN favorites are applied).
-  const onSetFavoritesFromDrive = useCallback((favoritesSongKeys: Set<string>) => {
-    if (!favoritesSongKeys.size) return;
+  const onSetFavoritesFromDrive = useCallback((favorites: Map<string, boolean>) => {
+    // Set-style apply (add AND remove) matching by song key. An empty map
+    // (no device has any favorite record yet) is treated as "no cloud data yet"
+    // so we never wipe local favorites on the very first sync — but once any
+    // favorite record exists, removals (fav=false) propagate too.
+    if (!favorites || favorites.size === 0) return;
     let changed = false;
     for (const t of webTrackStore.getAll()) {
-      if (favoritesSongKeys.has(songKeyOf(t)) && !t.isFavorite) {
-        t.isFavorite = true;
+      const should = favorites.get(songKeyOf(t)) ?? false;
+      if (should !== !!t.isFavorite) {
+        t.isFavorite = should;
         changed = true;
       }
     }
@@ -971,38 +995,105 @@ const WebApp: React.FC = () => {
 
   // Inject tracks synced from another device (their audio lives in Drive) into
   // the web library so they appear in the list; audioUrl uses a `drive://<fileId>`
-  // marker resolved to a real blob at play time (see handleDrivePlayback).
+  // resolver. Newly seen drive tracks are also auto-downloaded (persisted to
+  // IndexedDB) so they're playable without an extra tap. Tracks that were
+  // removed on another device (no longer in the cloud list) are removed here.
   const onApplyDriveTracks = useCallback((driveTracks: SyncTrackMeta[]) => {
-    if (!driveTracks.length) return;
+    const token = driveTokenRef.current;
     let added = 0;
+    // De-dup by song key: if we already have this song locally — whether it's a
+    // Drive-synced `drive-*` entry or a track the USER imported/uploaded from
+    // this device (non-`drive-` id, same song key) — don't inject a second copy.
+    const localSongs = new Set(webTrackStore.getAll().map((t) => songKeyOf(t)));
+
     for (const m of driveTracks) {
       if (!m.driveFileId) continue;
-      if (webTrackStore.getById(`drive-${m.songKey}`)) continue;
-      const t: TrackData = {
-        id: `drive-${m.songKey}`,
-        title: m.title,
-        artist: m.artist,
-        album: m.album,
-        albumArtist: m.albumArtist || m.artist,
-        durationSecs: m.durationSecs || 0,
-        trackNumber: null,
-        discNumber: null,
-        genre: m.genre || "",
-        year: m.year ?? null,
-        codec: m.codec || "mp3",
-        hasArtwork: false,
-        dateAdded: new Date(),
-        isFavorite: m.isFavorite,
-        audioUrl: `drive://${m.driveFileId}`,
-        sourceName: `${m.title} (Drive)`,
-      };
-      webTrackStore.addTrack(t);
-      added++;
+      if (localSongs.has(m.songKey)) continue; // already present → avoid duplicates
+      const id = `drive-${m.songKey}`;
+      if (webTrackStore.getById(id)) continue; // defensive: same id already present
+      {
+        const t: TrackData = {
+          id,
+          title: m.title,
+          artist: m.artist,
+          album: m.album,
+          albumArtist: m.albumArtist || m.artist,
+          durationSecs: m.durationSecs || 0,
+          trackNumber: null,
+          discNumber: null,
+          genre: m.genre || "",
+          year: m.year ?? null,
+          codec: m.codec || "mp3",
+          hasArtwork: false,
+          dateAdded: new Date(),
+          isFavorite: m.isFavorite,
+          audioUrl: `drive://${m.driveFileId}`,
+          sourceName: `${m.title} (Drive)`,
+        };
+        webTrackStore.addTrack(t);
+        localSongs.add(m.songKey);
+        added++;
+      }
+      // Auto-download this Drive audio (if not already cached) so it survives
+      // restart and plays instantly.
+      if (token && !downloadedRef.current.has(id)) {
+        (async () => {
+          try {
+            const buf = await downloadAudioFile(token, m.driveFileId!);
+            const blob = new Blob([buf], { type: "audio/mpeg" });
+            await saveDownloadedAudio(id, blob);
+            downloadedRef.current.set(id, URL.createObjectURL(blob));
+            setDlVersion((v) => v + 1);
+          } catch { /* not downloaded yet — will download on first play */ }
+        })();
+      }
     }
+
     if (added > 0) {
       persistTracks(webTrackStore.getAll());
     }
+    // NOTE: deletion is intentionally NOT applied here via a local-vs-drive
+    // diff — an empty drive list must never delete the user's local library.
+    // Cross-device deletes are handled by explicit pending-deletes, not by diff.
   }, [persistTracks]);
+
+  // Apply EXPLICIT deletions received from Drive (song keys the user deleted on
+  // another device). For each, remove any local track whose song key matches —
+  // both a `drive-<songKey>` entry and a normal track with the same key — plus
+  // its downloaded audio copy. NEVER deletes from a diff: only these keys.
+  const onDeletedTracksFromDrive = useCallback((deletedKeys: string[]) => {
+    if (!deletedKeys.length) return;
+    const toRemove = new Set<string>();
+    for (const t of webTrackStore.getAll()) {
+      if (deletedKeys.includes(songKeyOf(t))) {
+        toRemove.add(t.id);
+      } else if (t.id.startsWith("drive-") && deletedKeys.includes(t.id.slice("drive-".length))) {
+        toRemove.add(t.id);
+      }
+    }
+    if (!toRemove.size) return;
+    let removedAudio = false;
+    for (const id of toRemove) {
+      // Free the downloaded copy too (IndexedDB blob + object URL).
+      const url = downloadedRef.current.get(id);
+      if (url) {
+        URL.revokeObjectURL(url);
+        downloadedRef.current.delete(id);
+        downloadedFormatRef.current.delete(id);
+        removeDownloadedAudio(id).catch(() => {});
+        removedAudio = true;
+      }
+      // Stop playback if we're removing the currently-playing track.
+      if (player.currentTrack && (player.currentTrack as any).id === id) {
+        engine.stop();
+      }
+      webTrackStore.removeTrack(id);
+    }
+    if (removedAudio) setDlVersion((v) => v + 1);
+    persistTracks(webTrackStore.getAll());
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [persistTracks, player.currentTrack, engine]);
+
 
   const driveSync = useWebDriveSync({
     ready,
@@ -1010,7 +1101,9 @@ const WebApp: React.FC = () => {
     onSetFavorites: onSetFavoritesFromDrive,
     onPlaylistsMerged: () => { /* playlists already stored via savePlaylists; state re-read in view */ },
     onDriveTracks: onApplyDriveTracks,
+    onDeletedTracks: onDeletedTracksFromDrive,
   });
+  driveRunSyncRef.current = driveSync.runSync;
 
   // Keep the live Drive token in a ref so the memoized play handler always sees
   // the current value after login (avoids stale-closure "sign in again" errors).
@@ -1062,14 +1155,16 @@ const WebApp: React.FC = () => {
       <canvas ref={bgCanvasRef} className="bg-canvas" />
       <div className="app-layout">
         <nav className="icon-sidebar">
-          <div className={`icon-nav-item ${activeTab === "Tracks" ? "active" : ""}`} onClick={() => setActiveTab("Tracks")} title="Tracks"><IconLibrary size={18} /></div>
-          <div className={`icon-nav-item ${activeTab === "Playlists" ? "active" : ""}`} onClick={() => setActiveTab("Playlists")} title="Playlists"><IconPlaylist size={18} /></div>
-          <div className={`icon-nav-item ${activeTab === "Queue" ? "active" : ""}`} onClick={() => setActiveTab(activeTab === "Queue" ? "Tracks" : "Queue")} title="Queue & Favorites"><IconClock size={18} /></div>
+          <div className={`icon-nav-item ${activeTab === "Tracks" ? "active" : ""}`} onClick={() => setActiveTab("Tracks")} title="Tracks"><IconLibrary size={18} /><span className="nav-label">Tracks</span></div>
+          <div className={`icon-nav-item ${activeTab === "Playlists" ? "active" : ""}`} onClick={() => setActiveTab("Playlists")} title="Playlists"><IconPlaylist size={18} /><span className="nav-label">Playlists</span></div>
+          <div className={`icon-nav-item ${activeTab === "Queue" ? "active" : ""}`} onClick={() => setActiveTab(activeTab === "Queue" ? "Tracks" : "Queue")} title="Queue & Favorites"><IconClock size={18} /><span className="nav-label">Queue</span></div>
           {(cloudUrl || lanUrl) && (
-            <div className={`icon-nav-item ${activeTab === "Online" ? "active" : ""}`} onClick={() => setActiveTab("Online")} title="Online Search"><IconGlobe size={18} /></div>
+            <div className={`icon-nav-item ${activeTab === "Online" ? "active" : ""}`} onClick={() => setActiveTab("Online")} title="Online Search"><IconGlobe size={18} /><span className="nav-label">Online</span></div>
           )}
           <div className="icon-nav-spacer" />
-          <div className={`icon-nav-item ${activeTab === "Settings" ? "active" : ""}`} onClick={() => setActiveTab("Settings")} title="Settings"><IconSettings size={18} /></div>
+          <div className={`icon-nav-item ${activeTab === "Settings" ? "active" : ""}`} onClick={() => setActiveTab("Settings")} title="Settings"><IconSettings size={18} /><span className="nav-label">Settings</span></div>
+          {/* Google Drive / login */}
+          <div className={`icon-nav-item ${activeTab === "Login" ? "active" : ""}`} onClick={() => setActiveTab("Login")} title="Google Drive Sync"><IconLogin size={18} /><span className="nav-label">Login</span></div>
           {/* Import button */}
           <div className="icon-nav-item" onClick={() => fileInputRef.current?.click()} title="Import Music">
             <IconUpload size={18} />
@@ -1170,13 +1265,13 @@ const WebApp: React.FC = () => {
                 onOpenSettings={() => setActiveTab("Settings")}
               />
             ) : activeTab === "Playlists" ? (
-              <WebPlaylistsView tracks={tracks} onPlay={handlePlayTrack} />
+              <WebPlaylistsView tracks={tracks} onPlay={handlePlayTrack} onChanged={(ids) => ids?.forEach((id) => driveSync.touchPlaylist(id))} />
             ) : activeTab === "Queue" ? (
               <div className="queue-tab">
                 <QueuePanel libraryTracks={queuePanelTracks} />
               </div>
-            ) : activeTab === "Settings" ? (
-              <>
+            ) : activeTab === "Login" ? (
+              <div className="web-settings" style={{ padding: 24 }}>
                 <GoogleDriveSyncPanel
                   signedIn={driveSync.signedIn}
                   account={driveSync.account}
@@ -1184,9 +1279,25 @@ const WebApp: React.FC = () => {
                   hasConfig={driveSync.hasConfig}
                   onSignIn={driveSync.signIn}
                   onSignOut={driveSync.signOut}
-                  onRunSync={driveSync.runSync}
+                  onUpload={driveSync.upload}
+                  onDownload={driveSync.download}
+                  onClean={() => {
+                    if (window.confirm("Delete ALL Google Drive sync data (sync list + uploaded audio), reset this device's sync state, AND remove every track from this device (local library + stored/downloaded audio)? This is permanent and cannot be undone.")) {
+                      // Wipe this device's local library + stored/downloaded audio.
+                      webTrackStore.clear();
+                      persistTracks([]);
+                      for (const [id, url] of downloadedRef.current) { try { URL.revokeObjectURL(url); } catch { /* ignore */ } }
+                      downloadedRef.current.clear();
+                      downloadedFormatRef.current.clear();
+                      clearAllDownloadedAudio().catch(() => { /* best-effort */ });
+                      setDlVersion((v) => v + 1);
+                      driveSync.clean().catch(() => { /* local state already cleared; keep UI stable */ });
+                    }
+                  }}
                   onOpenGuide={() => { try { window.open("https://github.com/Revampes/NeedMusic/blob/main/docs/google-drive-sync.md", "_blank"); } catch { /* ignore */ } }}
                 />
+              </div>
+            ) : activeTab === "Settings" ? (
                 <WebSettingsView
                   lanUrl={lanUrl}
                   cloudUrl={cloudUrl}
@@ -1210,7 +1321,6 @@ const WebApp: React.FC = () => {
                   syncLibrary={syncLanLibrary}
                   autoStatus={lanStatus}
                 />
-              </>
             ) : (
               <>
                 {tracks.length > 0 && (
@@ -1261,6 +1371,7 @@ const WebApp: React.FC = () => {
         <WebAddToPlaylistModal
           track={playlistTarget}
           onClose={() => setPlaylistTarget(null)}
+          onChanged={(ids) => ids?.forEach((id) => driveSync.touchPlaylist(id))}
         />
       )}
       {/* Player Bar */}
@@ -1689,33 +1800,27 @@ const WebSettingsView: React.FC<{
       </div>
 
       {/* ── Cloud Search (Render) ── */}
-      <div style={{ marginBottom: 16, padding: 12, border: "1px solid #333", borderRadius: 8, background: "#14141f" }}>
-        <h4 style={{ marginBottom: 8, fontSize: 14 }}>☁️ Cloud Search <span style={{ color: "#888", fontSize: 11, fontWeight: 400 }}>(optional, no computer needed)</span></h4>
-        <p style={{ fontSize: 11, color: "#999", marginBottom: 8, lineHeight: 1.5 }}>
-          A free Render web service that runs Bilibili search in the cloud so you can search online music
-          even when your computer is off or on a different network. It only does <strong>search</strong>
-          (Bilibili) — no downloads, no YouTube, no accounts. When the cloud is unreachable this falls back
-          to your computer (LAN sync) automatically.
-        </p>
-        <div style={{ display: "flex", gap: 6, marginBottom: 8 }}>
+      <div style={{ padding: "4px 0 16px", borderBottom: "1px solid var(--glass-border, rgba(255,255,255,0.08))", marginBottom: 12 }}>
+        <h4 style={{ marginBottom: 8, fontSize: 16 }}>☁️ Cloud Search</h4>
+        <div style={{ display: "flex", gap: 8, marginBottom: 8, alignItems: "center" }}>
           <input
             value={cloudInput}
             onChange={(e) => setCloudInput(e.target.value)}
             placeholder="https://your-app.onrender.com"
             inputMode="url"
-            style={{ flex: 1, padding: "6px 8px", background: "#1a1a1a", border: "1px solid #333", color: "#e0e0e0", borderRadius: 4, fontSize: 13 }}
+            style={{ flex: 1, padding: "10px 12px", background: "#1a1a1a", border: "1px solid #333", color: "#e0e0e0", borderRadius: 6, fontSize: 16 }}
           />
           <button
             onClick={saveCloud}
             disabled={cloudBusy}
-            style={{ padding: "6px 14px", background: cloudUrl ? "#333" : "#2f6fed", color: "#fff", border: "none", borderRadius: 4, cursor: "pointer", fontSize: 13 }}
+            style={{ padding: "10px 16px", background: cloudUrl ? "#333" : "#2f6fed", color: "#fff", border: "none", borderRadius: 6, cursor: "pointer", fontSize: 15 }}
           >
             {cloudBusy ? "…" : cloudUrl ? "Update" : "Enable"}
           </button>
           {cloudUrl && (
             <button
               onClick={() => { setCloudInput(""); onCloudChange(""); setCloudStatus("Cloud search disabled."); }}
-              style={{ padding: "6px 10px", background: "transparent", color: "#e94560", border: "1px solid #e94560", borderRadius: 4, cursor: "pointer", fontSize: 13 }}
+              style={{ padding: "10px 12px", background: "transparent", color: "#e94560", border: "1px solid #e94560", borderRadius: 6, cursor: "pointer", fontSize: 15 }}
             >
               Disable
             </button>
@@ -1726,26 +1831,20 @@ const WebSettingsView: React.FC<{
       </div>
 
       {/* ── LAN Sync (experimental) ── */}
-      <div style={{ marginBottom: 16, padding: 12, border: "1px solid #333", borderRadius: 8, background: "#14141f" }}>
-        <h4 style={{ marginBottom: 8, fontSize: 14 }}>Sync with Computer <span style={{ color: "#888", fontSize: 11, fontWeight: 400 }}>(experimental)</span></h4>
-        <p style={{ fontSize: 11, color: "#999", marginBottom: 8, lineHeight: 1.5 }}>
-          On your computer open Settings → LAN Sync → Start Server, then open the address it shows
-          on this phone — it contains a security token, e.g. <code style={{ color: "#ccc" }}>http://192.168.1.10:17963/?token=…</code>.
-          The player loads directly from your computer (no separate web server needed).
-          Your phone and computer must be on the same Wi-Fi.
-        </p>
-        <div className="lan-connect-row" style={{ display: "flex", gap: 6, marginBottom: 8 }}>
+      <div style={{ padding: "4px 0 16px", borderBottom: "1px solid var(--glass-border, rgba(255,255,255,0.08))", marginBottom: 12 }}>
+        <h4 style={{ marginBottom: 8, fontSize: 16 }}>Sync with Computer</h4>
+        <div className="lan-connect-row" style={{ display: "flex", gap: 8, marginBottom: 8, alignItems: "center" }}>
           <input
             value={serverUrl}
             onChange={(e) => setServerUrl(e.target.value)}
             placeholder="http://192.168.1.10:17963"
             inputMode="url"
-            style={{ flex: 1, padding: "6px 8px", background: "#1a1a1a", border: "1px solid #333", color: "#e0e0e0", borderRadius: 4, fontSize: 13 }}
+            style={{ flex: 1, padding: "10px 12px", background: "#1a1a1a", border: "1px solid #333", color: "#e0e0e0", borderRadius: 6, fontSize: 16 }}
           />
           <button
             onClick={connect}
             disabled={lanBusy || !serverUrl.trim()}
-            style={{ padding: "6px 14px", background: lanUrl ? "#333" : "#e94560", color: "#fff", border: "none", borderRadius: 4, cursor: "pointer", fontSize: 13 }}
+            style={{ padding: "10px 16px", background: lanUrl ? "#333" : "#e94560", color: "#fff", border: "none", borderRadius: 6, cursor: "pointer", fontSize: 15 }}
           >
             {lanBusy ? "…" : lanUrl ? "Reconnect" : "Connect"}
           </button>
@@ -1756,7 +1855,7 @@ const WebSettingsView: React.FC<{
                 setServerUrl("");
                 setLanStatus("Disconnected. Synced tracks stay on this device.");
               }}
-              style={{ padding: "6px 10px", background: "transparent", color: "#e94560", border: "1px solid #e94560", borderRadius: 4, cursor: "pointer", fontSize: 13 }}
+              style={{ padding: "10px 12px", background: "transparent", color: "#e94560", border: "1px solid #e94560", borderRadius: 6, cursor: "pointer", fontSize: 15 }}
             >
               Disconnect
             </button>
@@ -1779,15 +1878,11 @@ const WebSettingsView: React.FC<{
       </div>
 
       {/* ── Offline listening ── */}
-      <div style={{ marginBottom: 16, padding: 12, border: "1px solid #333", borderRadius: 8, background: "#14141f" }}>
-        <h4 style={{ marginBottom: 8, fontSize: 14 }}>🎧 Offline listening (without the computer)</h4>
-        <p style={{ fontSize: 11, color: "#999", marginBottom: 8, lineHeight: 1.5 }}>
-          Downloaded tracks live inside this browser for this address only, and phones can't keep
-          this page open when the computer is off. To listen without the computer:
-        </p>
-        <ol style={{ fontSize: 11, color: "#bbb", lineHeight: 1.7, margin: 0, paddingLeft: 18 }}>
-          <li><strong>Save to Files</strong> — tap the <IconFolder size={11} style={{ verticalAlign: "middle" }} /> folder icon on a downloaded track to save the real audio file to your iPhone, or use <strong>"Save all (.zip)"</strong> next to the search bar to bundle every downloaded track into one ZIP (the Files app unzips it natively). Play anytime in the Files or Music app — no server needed.</li>
-          <li><strong>Install the app</strong> — open the app at its <strong>HTTPS</strong> address (e.g. the GitHub Pages link), tap <em>Share → Add to Home Screen</em>, and it opens even offline. Then use the upload button to import the files you saved in step 1.</li>
+      <div style={{ padding: "4px 0 12px", borderBottom: "1px solid var(--glass-border, rgba(255,255,255,0.08))", marginBottom: 12 }}>
+        <h4 style={{ marginBottom: 8, fontSize: 16 }}>🎧 Offline</h4>
+        <ol style={{ fontSize: 14, color: "#bbb", lineHeight: 1.7, margin: 0, paddingLeft: 18 }}>
+          <li>Save to Files: tap <IconFolder size={14} style={{ verticalAlign: "middle" }} /> on a downloaded track, or use <strong>Save all (.zip)</strong></li>
+          <li>Install the app (Add to Home Screen) to open offline</li>
         </ol>
       </div>
 
@@ -2030,7 +2125,7 @@ function applyFavoriteIds(ids: string[]): void {
   }
 }
 
-const WebPlaylistsView: React.FC<{ tracks: TrackData[]; onPlay: (t: TrackData) => void }> = ({ tracks, onPlay }) => {
+const WebPlaylistsView: React.FC<{ tracks: TrackData[]; onPlay: (t: TrackData) => void; onChanged?: (ids: string[]) => void }> = ({ tracks, onPlay, onChanged }) => {
   const [playlists, setPlaylists] = useState<WebPlaylist[]>(loadPlaylists);
   const [newName, setNewName] = useState("");
   const [selected, setSelected] = useState<string | null>(null);
@@ -2044,16 +2139,19 @@ const WebPlaylistsView: React.FC<{ tracks: TrackData[]; onPlay: (t: TrackData) =
     const pl: WebPlaylist = { id: `pl-${Date.now()}`, name, trackIds: [] };
     const updated = [...playlists, pl];
     setPlaylists(updated); savePlaylists(updated); setNewName("");
+    onChanged?.([pl.id]);
   };
 
   const addToPlaylist = (plId: string, trackId: string) => {
     const updated = playlists.map(p => p.id === plId ? { ...p, trackIds: [...p.trackIds.filter(id => id !== trackId), trackId] } : p);
     setPlaylists(updated); savePlaylists(updated);
+    onChanged?.([plId]);
   };
 
   const removeFromPlaylist = (plId: string, trackId: string) => {
     const updated = playlists.map(p => p.id === plId ? { ...p, trackIds: p.trackIds.filter(id => id !== trackId) } : p);
     setPlaylists(updated); savePlaylists(updated);
+    onChanged?.([plId]);
   };
 
   const deletePlaylist = (plId: string) => {
@@ -2116,7 +2214,8 @@ const WebPlaylistsView: React.FC<{ tracks: TrackData[]; onPlay: (t: TrackData) =
 const WebAddToPlaylistModal: React.FC<{
   track: TrackData;
   onClose: () => void;
-}> = ({ track, onClose }) => {
+  onChanged?: (touchedPlaylistIds: string[]) => void;
+}> = ({ track, onClose, onChanged }) => {
   const [playlists, setPlaylists] = useState<WebPlaylist[]>(loadPlaylists);
   const [newName, setNewName] = useState("");
   const [checked, setChecked] = useState<Record<string, boolean>>({});
@@ -2140,7 +2239,10 @@ const WebAddToPlaylistModal: React.FC<{
         ? { ...p, trackIds: [...p.trackIds.filter((id) => id !== track.id), track.id] }
         : p
     );
+    const touched: string[] = Object.keys(checked).filter((id) => checked[id]);
+    if (createdId) touched.push(createdId);
     commit(next);
+    onChanged?.(touched);
     onClose();
   };
 
@@ -2304,6 +2406,8 @@ const mobileStyles = `
 }
 
 /* ── Queue & Favorites as a page tab (nav stays visible) ── */
+/* Nav labels only appear on mobile (see the ≤1024px block below). */
+.nav-label { display: none; }
 .queue-tab { flex: 1; display: flex; flex-direction: column; min-height: 0; }
 .queue-tab .queue-panel {
   display: flex !important;
@@ -2418,8 +2522,26 @@ const mobileStyles = `
     -webkit-overflow-scrolling: touch;
     align-items: center !important;
   }
-  .icon-nav-item { width: 54px !important; height: 54px !important; flex-shrink: 0 !important; }
-  .icon-nav-item svg { width: 26px !important; height: 26px !important; }
+  /* Nav items: below the icon, show its label; bigger tappable targets. */
+  .icon-sidebar { flex-wrap: nowrap !important; }
+  .icon-nav-item {
+    width: auto !important;
+    height: 64px !important;
+    min-width: 64px !important;
+    flex-shrink: 1 !important;
+    padding: 6px 10px !important;
+    flex-direction: column !important;
+    gap: 3px !important;
+  }
+  .icon-nav-item svg { width: 28px !important; height: 28px !important; }
+  .nav-label {
+    display: block !important;
+    font-size: 12px !important;
+    line-height: 1 !important;
+    color: var(--text-secondary);
+    white-space: nowrap;
+  }
+  .icon-nav-item.active .nav-label { color: var(--accent-primary); }
   .icon-nav-spacer { display: none !important; }
 
   .main-area { width: 100% !important; flex: 1 !important; min-height: 0 !important; }
@@ -2500,6 +2622,31 @@ const mobileStyles = `
   .settings-row { flex-wrap: wrap !important; gap: 8px !important; }
   .settings-row input[type="range"] { flex: 1 !important; min-width: 140px !important; }
   .settings-input.short { width: 100% !important; }
+
+  /* Allow long track titles to wrap onto a new line instead of being cut off,
+     and let the thumbnail stay top-aligned when wrapping. */
+  .col-title {
+    white-space: normal !important;
+    flex-wrap: wrap !important;
+    line-height: 1.35 !important;
+  }
+  .col-title .multiline-text { overflow: visible !important; }
+
+  /* Bigger ⋯ action sheet: wider and taller so text is comfortably readable. */
+  .action-sheet { width: 100% !important; max-width: 100% !important; border-radius: 16px 16px 0 0 !important; }
+  .action-sheet-item { font-size: 17px !important; padding: 18px 22px !important; gap: 14px !important; }
+  .action-sheet-cancel { font-size: 17px !important; padding: 18px !important; }
+
+  /* Bigger, full-width player bar text. */
+  .player-artwork { width: 56px !important; height: 56px !important; font-size: 22px !important; }
+  .player-title { font-size: 19px !important; line-height: 1.2 !important; }
+  .player-artist { font-size: 16px !important; }
+  .player-bar-play { width: 64px !important; height: 64px !important; }
+
+  /* Now-playing sheet: larger text everywhere. */
+  .np-title { font-size: 22px !important; }
+  .np-artist { font-size: 17px !important; }
+  .np-time, .np-close { font-size: 15px !important; }
 }
 
 @media (max-width: 480px) {

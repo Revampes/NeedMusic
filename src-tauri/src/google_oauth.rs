@@ -123,17 +123,23 @@ fn extract_param(query: &str, name: &str) -> Option<String> {
     None
 }
 
-/// Exchange an authorization `code` for an access token, using the client id +
-/// client_secret (Google requires a secret for this client even with PKCE).
-/// Uses the ASYNC reqwest client: Tauri commands run in tokio's async context,
-/// and a *blocking* call there panics with
+/// Successful token response (access + optional refresh).
+struct TokenResult {
+    access_token: String,
+    refresh_token: Option<String>,
+}
+
+/// Exchange an authorization `code` for an access token (+ refresh if offline),
+/// using the client id + client_secret (Google requires a secret for this
+/// client even with PKCE). Uses the ASYNC reqwest client: Tauri commands run in
+/// tokio's async context, and a *blocking* call there panics with
 /// "Cannot drop a runtime in a context where blocking is not allowed".
 async fn exchange_code(
     client_id: &str,
     client_secret: &str,
     verifier: &str,
     code: &str,
-) -> Result<String, String> {
+) -> Result<TokenResult, String> {
     let client = reqwest::Client::new();
     let mut params: Vec<(&str, &str)> = vec![
         ("code", code),
@@ -167,10 +173,47 @@ async fn exchange_code(
                 .unwrap_or("unknown error")
         ));
     }
-    json.get("access_token")
+    let access = json
+        .get("access_token")
         .and_then(|v| v.as_str())
-        .map(|s| s.to_string())
-        .ok_or_else(|| "no access_token in response".to_string())
+        .ok_or_else(|| "no access_token in response".to_string())?;
+    let refresh = json.get("refresh_token").and_then(|v| v.as_str());
+    Ok(TokenResult {
+        access_token: access.to_string(),
+        refresh_token: refresh.map(|s| s.to_string()),
+    })
+}
+
+/// Exchange a refresh_token for a fresh access_token (silent renewal).
+async fn refresh_access_token(
+    client_id: &str,
+    client_secret: &str,
+    refresh_token: &str,
+) -> Result<Option<String>, String> {
+    let client = reqwest::Client::new();
+    let mut params: Vec<(&str, &str)> = vec![
+        ("client_id", client_id),
+        ("grant_type", "refresh_token"),
+        ("refresh_token", refresh_token),
+    ];
+    if !client_secret.is_empty() {
+        params.push(("client_secret", client_secret));
+    }
+    let resp = client
+        .post(TOKEN_URL)
+        .form(&params)
+        .send()
+        .await
+        .map_err(|e| format!("refresh request failed: {e}"))?;
+    let status = resp.status();
+    let json: serde_json::Value = resp
+        .json()
+        .await
+        .map_err(|e| format!("refresh parse failed: {e}"))?;
+    if !status.is_success() {
+        return Err(format!("refresh HTTP {}: {}", status, json));
+    }
+    Ok(json.get("access_token").and_then(|v| v.as_str()).map(|s| s.to_string()))
 }
 
 /// Tauri command — start the system-browser OAuth flow and return the
@@ -196,7 +239,7 @@ pub async fn google_oauth_start(client_id: String, scope: String) -> Result<Stri
     std::thread::spawn(move || serve_callback(listener, expected));
 
     let auth_url = format!(
-        "https://accounts.google.com/o/oauth2/v2/auth?client_id={}&redirect_uri={}&response_type=code&scope={}&code_challenge={}&code_challenge_method=S256&state={}&prompt=consent",
+        "https://accounts.google.com/o/oauth2/v2/auth?client_id={}&redirect_uri={}&response_type=code&scope={}&code_challenge={}&code_challenge_method=S256&state={}&prompt=consent&access_type=offline&include_granted_scopes=true",
         percent_encode(&client_id),
         percent_encode(OAUTH_REDIRECT),
         percent_encode(&scope),
@@ -211,8 +254,9 @@ pub async fn google_oauth_start(client_id: String, scope: String) -> Result<Stri
     // front-end's shell::open is the reliable path and keeps `&` intact.
 }
 
-/// Tauri command — poll for the OAuth result (non-blocking). Returns the
-/// access token once the browser returned and it was exchanged, else empty.
+/// Tauri command — poll for the OAuth result (non-blocking). Returns JSON
+/// `{"access_token": "...", "refresh_token": "..."}` once the browser returned
+/// and the code was exchanged; otherwise an empty string (still waiting).
 #[tauri::command]
 pub async fn google_oauth_poll(client_id: String, client_secret: String) -> Result<String, String> {
     let sh = shared();
@@ -222,15 +266,35 @@ pub async fn google_oauth_poll(client_id: String, client_secret: String) -> Resu
         // Clear so subsequent polls don't re-return the same token.
         *sh.code.lock().unwrap() = None;
         let verifier = sh.verifier.lock().unwrap().clone().unwrap_or_default();
-        let token = exchange_code(&client_id, &client_secret, &verifier, &code).await?;
+        let res = exchange_code(&client_id, &client_secret, &verifier, &code).await?;
         eprintln!("[oauth] token exchanged ok");
         // Done with this flow's verifier.
         *sh.verifier.lock().unwrap() = None;
         *sh.state_expected.lock().unwrap() = None;
-        Ok(token)
+        let body = serde_json::json!({
+            "access_token": res.access_token,
+            "refresh_token": res.refresh_token,
+        });
+        Ok(body.to_string())
     } else {
         Ok(String::new())
     }
+}
+
+/// Tauri command — silently refresh an expired access token using a stored
+/// refresh_token. Returns the fresh access token or an error.
+#[tauri::command]
+pub async fn google_oauth_refresh(
+    client_id: String,
+    client_secret: String,
+    refresh_token: String,
+) -> Result<String, String> {
+    if refresh_token.is_empty() {
+        return Err("no refresh token".to_string());
+    }
+    let token = refresh_access_token(&client_id, &client_secret, &refresh_token).await?
+        .ok_or_else(|| "refresh returned no access token".to_string())?;
+    Ok(token)
 }
 
 /// Tauri command — abort/discard any in-flight OAuth expectations.

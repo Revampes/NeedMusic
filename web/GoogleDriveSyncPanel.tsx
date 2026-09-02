@@ -1,10 +1,10 @@
 /**
  * GoogleDriveSyncPanel — the UI for NeedMusic's free Google-Drive-based
- * cross-device sync. Rendered inside the web Settings tab.
+ * cross-device sync. Rendered on the web "Login" page.
  *
- *   - unauth: "Sign in with Google" button (renders a branded GIS button).
- *   - auth: shows the account + a live sync status line + Sign out.
- *   - config missing: a link to the setup guide.
+ * Styled to match the rest of the settings pages: no box/card, just a clean
+ * section with a horizontal divider keeping it consistent with the app's
+ * background (no purple/blue card look).
  */
 
 import React from "react";
@@ -17,7 +17,9 @@ export interface GoogleSyncPanelProps {
   hasConfig: boolean;
   onSignIn: () => void;
   onSignOut: () => void;
-  onRunSync: () => void;
+  onUpload: () => void;
+  onDownload: () => void;
+  onClean: () => void;
   onOpenGuide: () => void;
 }
 
@@ -43,111 +45,109 @@ const GoogleDriveSyncPanel: React.FC<GoogleSyncPanelProps> = ({
   hasConfig,
   onSignIn,
   onSignOut,
-  onRunSync,
+  onUpload,
+  onDownload,
+  onClean,
   onOpenGuide,
 }) => {
   const busy = isBusy(status);
   const error = status.state === "error";
   const synced = status.state === "synced";
+  const divider = { padding: "4px 0 16px", borderBottom: "1px solid var(--glass-border, rgba(255,255,255,0.08))", marginBottom: 12 } as const;
 
   return (
-    <div style={{ marginBottom: 16, padding: 12, border: "1px solid #333", borderRadius: 8, background: "#14141f" }}>
-      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 8 }}>
-        <h4 style={{ margin: 0, fontSize: 14 }}>
-          <span style={{ marginRight: 4 }}>☁️</span> Google Drive Sync
-          <span style={{ color: "#888", fontSize: 11, fontWeight: 400 }}> (free, cross-device)</span>
-        </h4>
-        {busy && <span className="lan-dot web-lan-dot" style={{ color: "#f0a500" }}></span>}
-      </div>
+    <section>
+      <h4 style={{ marginBottom: 12, fontSize: 16 }}>Google Drive Sync</h4>
 
-      <p style={{ fontSize: 11, color: "#999", marginBottom: 10, lineHeight: 1.5 }}>
-        Sync your favorites and playlists to your own Google Drive (private{" "}
-        <code style={{ color: "#ccc" }}>appDataFolder</code>) so they follow you to any device —
-        no account on NeedMusic's servers, no quota on your visible Drive.{" "}
-        <button onClick={onOpenGuide} style={{ background: "none", border: "none", color: "#2f6fed", cursor: "pointer", fontWeight: 600, padding: 0, fontSize: 11 }}>
-          Setup guide
-        </button>
-      </p>
+      {!hasConfig && (
+        <div style={divider}>
+          <button
+            onClick={onOpenGuide}
+            style={{ padding: "10px 16px", background: "#333", color: "#fff", border: "none", borderRadius: 6, cursor: "pointer", fontSize: 15 }}
+          >
+            Configure Google CLIENT_ID →
+          </button>
+        </div>
+      )}
 
       {error && (
-        <p style={{ fontSize: 11, color: "var(--color-error)", background: "rgba(233,69,96,0.08)", border: "1px solid rgba(233,69,96,0.2)", borderRadius: 6, padding: "8px 10px", lineHeight: 1.5, marginBottom: 10 }}>
+        <div style={{ fontSize: 14, color: "var(--color-error)", marginBottom: 12 }}>
           {status.detail}
-        </p>
+        </div>
       )}
 
       {!hasConfig ? (
-        <button
-          onClick={onOpenGuide}
-          style={{ padding: "8px 16px", background: "#333", color: "#fff", border: "none", borderRadius: 6, cursor: "pointer", fontSize: 13 }}
-        >
-          Configure Google CLIENT_ID →
-        </button>
+        <></>
       ) : signedIn ? (
-        <>
-          <div style={{ display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap" }}>
+        <div style={divider}>
+          <div style={{ display: "flex", alignItems: "center", gap: 12, flexWrap: "wrap" }}>
             {account?.picture && (
-              <img src={account.picture} alt="" width={26} height={26} style={{ borderRadius: "50%", objectFit: "cover" }} referrerPolicy="no-referrer" />
+              <img src={account.picture} alt="" width={40} height={40} style={{ borderRadius: "50%", objectFit: "cover" }} referrerPolicy="no-referrer" />
             )}
-            <span style={{ fontSize: 13, color: "#e0e0e0" }}>
+            <span style={{ fontSize: 16 }}>
               {account?.name || "Signed in"}
-              {account?.email && <span style={{ color: "#888", display: "block", fontSize: 11 }}>{account.email}</span>}
+              {account?.email && <span style={{ color: "var(--text-tertiary)", display: "block", fontSize: 13 }}>{account.email}</span>}
             </span>
-            <span
-              style={{
-                fontSize: 11,
-                padding: "2px 8px",
-                borderRadius: 4,
-                background: synced ? "rgba(78,204,163,0.12)" : error ? "rgba(233,69,96,0.12)" : "rgba(240,165,0,0.1)",
-                color: synced ? "#4ecdc4" : error ? "#e94560" : "#f0a500",
-              }}
-            >
+            <span style={{ fontSize: 13, color: synced ? "var(--color-success)" : error ? "var(--color-error)" : "var(--text-tertiary)" }}>
               {busy ? "…" : statusText(status)}
             </span>
           </div>
-          <div style={{ display: "flex", gap: 8, marginTop: 10, flexWrap: "wrap" }}>
+          <div style={{ display: "flex", gap: 10, marginTop: 14, flexWrap: "wrap" }}>
             <button
-              onClick={onRunSync}
+              onClick={onUpload}
               disabled={busy}
-              style={{ padding: "6px 14px", background: "#333", color: "#fff", border: "none", borderRadius: 4, cursor: "pointer", fontSize: 12 }}
+              style={{ padding: "10px 16px", background: "#333", color: "#fff", border: "none", borderRadius: 6, cursor: "pointer", fontSize: 15 }}
             >
-              {busy ? "Syncing…" : "Sync now"}
+              Upload
+            </button>
+            <button
+              onClick={onDownload}
+              disabled={busy}
+              style={{ padding: "10px 16px", background: "#2f6fed", color: "#fff", border: "none", borderRadius: 6, cursor: "pointer", fontSize: 15 }}
+            >
+              Download
             </button>
             <button
               onClick={onSignOut}
-              style={{ padding: "6px 14px", background: "transparent", color: "#e94560", border: "1px solid #e94560", borderRadius: 4, cursor: "pointer", fontSize: 12 }}
+              style={{ padding: "10px 16px", background: "transparent", color: "var(--color-error)", border: "1px solid var(--color-error)", borderRadius: 6, cursor: "pointer", fontSize: 15 }}
             >
               Sign out
             </button>
+            <button
+              onClick={onClean}
+              disabled={busy}
+              title="Delete all Drive sync data (envelope + audio) and reset local sync state"
+              style={{ padding: "10px 16px", background: "transparent", color: "var(--color-error)", border: "1px solid #a02030", borderRadius: 6, cursor: "pointer", fontSize: 15, opacity: busy ? 0.5 : 1 }}
+            >
+              🧹 Clean everything
+            </button>
           </div>
-        </>
+        </div>
       ) : (
-        <>
+        <div style={divider}>
           <button
             onClick={onSignIn}
             disabled={busy}
             style={{
               display: "inline-flex",
               alignItems: "center",
-              gap: 8,
-              padding: "8px 16px",
+              gap: 10,
+              padding: "12px 22px",
               borderRadius: 6,
-              border: "1px solid #2f6fed",
-              background: "#2f6fed",
+              border: "none",
+              background: "var(--accent-primary, #e94560)",
               color: "#fff",
               cursor: "pointer",
-              fontSize: 14,
+              fontSize: 16,
               fontWeight: 500,
             }}
           >
-            <span aria-hidden style={{ fontSize: 16 }}>G</span>
+            <span aria-hidden style={{ fontSize: 18 }}>G</span>
             {busy ? "Signing in…" : "Sign in with Google"}
           </button>
-          <p style={{ fontSize: 10, color: "#666", marginTop: 8, marginBottom: 0 }}>
-            Only needs the non-sensitive <code>drive.appdata</code> scope — your private app folder.
-          </p>
-        </>
+        </div>
       )}
-    </div>
+    </section>
   );
 };
 

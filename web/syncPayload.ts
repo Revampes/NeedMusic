@@ -44,6 +44,7 @@ export function toSyncableState(
   tracks: TrackData[],
   playlists: unknown[],
   cloudTracks?: SyncTrackMeta[],
+  deletedTracks?: string[],
 ): SyncableState {
   const pl: { id: string; name: string; trackKeys: string[] }[] = (playlists as any[])
     .filter((p) => p && p.id && p.name)
@@ -53,7 +54,17 @@ export function toSyncableState(
       trackKeys: toTrackKeys(tracks, Array.isArray(p.trackIds) ? p.trackIds : []),
     }));
   const out = syncableFromTracks(tracks, pl) as SyncableState;
-  if (cloudTracks && cloudTracks.length) out.tracks = cloudTracks;
+  if (cloudTracks && cloudTracks.length) {
+    // Keep drive-synced audio refs only for songs that still exist locally.
+    // A drive track the user deleted locally (absent from `tracks`) must NOT be
+    // re-added to the outgoing payload — otherwise the deletion is undone and
+    // the track is "revived" on every device.
+    const localKeys = new Set(tracks.map((t) => songKeyOf(t)));
+    const kept = cloudTracks.filter((t) => localKeys.has(t.songKey));
+    if (kept.length) out.tracks = kept;
+  }
+  // Expose this device's explicit deletions so they propagate to Drive.
+  if (deletedTracks && deletedTracks.length) out.deletedTracks = [...new Set(deletedTracks)].sort();
   return out;
 }
 
@@ -77,7 +88,7 @@ export interface ResolvedPlaylist {
 export function applySyncedState(
   state: SyncableState,
   localTracks: TrackData[],
-): { favoritesSongKeys: Set<string>; playlists: ResolvedPlaylist[]; driveTracks: SyncTrackMeta[] } {
+): { favoritesSongKeys: Set<string>; playlists: ResolvedPlaylist[]; driveTracks: SyncTrackMeta[]; deletedTracks: string[] } {
   // Map song key → local track id (first match wins).
   const keyToIds = new Map<string, string[]>();
   for (const t of localTracks) {
@@ -106,5 +117,6 @@ export function applySyncedState(
     favoritesSongKeys: new Set(state.favorites ?? []),
     playlists,
     driveTracks: state.tracks ?? [],
+    deletedTracks: state.deletedTracks ?? [],
   };
 }

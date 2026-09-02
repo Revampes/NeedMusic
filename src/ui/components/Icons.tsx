@@ -78,5 +78,6 @@ export const IconAlert     = mk("M10.29 3.86 1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 
 export const IconHourglass = mk("M5 22h14M5 2h14M12 8v5l4 4 M17 2.5H7a2 2 0 0 0-2 2v2.17a2 2 0 0 0 .59 1.42L9 11.5l-3.41 3.41A2 2 0 0 0 5 16.33V19a2 2 0 0 0 2 2"); // ⏳
 export const IconGlobe     = mk("M12 22a10 10 0 1 0 0-20 10 10 0 0 0 0 20z M2 12h20 M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10z"); // 🌐
 export const IconUpload    = mk("M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4 M17 8l-5-5-5 5 M12 3v12"); // ⬆️
+export const IconLogin     = mk("M15 3h4a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2h-4 M10 17l5-5-5-5 M15 12H3");   // 🔑 login (arrow into box)
 export const IconDownload  = mk("M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4 M7 10l5 5 5-5 M12 15V3"); // ⬇️
 export const IconLyrics    = mk("M8 5h12M8 11h12M8 17h8M4 5v.01M4 11v.01M4 17v.01");   // 🎵 lyrics (text lines)

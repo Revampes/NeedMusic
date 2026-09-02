@@ -10,13 +10,16 @@
  * the user's Drive UI and isolated per-client-id — which makes it ideal for
  * app-owned sync blobs. No quota is charged to the user's visible Drive quota.
  *
- * Data contract: this module is intentionally generic. Callers provide the
- * JSON `payload` they want persisted (e.g. `{ tracks, playlists, lastUpdated, deviceId }`).
- * Conflict resolution is timestamp-based on a top-level `lastUpdated` field.
+ * Data contract: each device owns a private file (`sync-<deviceId>.json`) and
+ * writes only to it; the merge of all devices' files is done deterministically
+ * in `cloudsync` (see `mergeDeviceFiles`).
  */
 
+import type { DeviceSyncFile } from "./cloudsync";
+
 export const SYNC_SCOPE = "https://www.googleapis.com/auth/drive.appdata";
-export const SYNC_FILE_NAME = "app_data.json";
+/** Each device owns ONE file named `sync-<deviceId>.json` in the appDataFolder. */
+export const SYNC_FILE_PREFIX = "sync-";
 export const GIS_SCRIPT_SRC = "https://accounts.google.com/gsi/client";
 
 /* ─── CLIENT_ID (shared, injected by each build) ────────────────────────── */
@@ -43,15 +46,6 @@ export function hasGoogleClientId(): boolean {
 }
 
 /* ─── Types ─────────────────────────────────────────────────────────────── */
-
-export interface DriveSyncEnvelope {
-  /** ISO-8601 timestamp of the last write — used for conflict resolution. */
-  lastUpdated: string;
-  /** Stable id of the last device/instance that wrote this blob. */
-  deviceId: string;
-  /** The app payload to merge/overwrite (opaque to this module). */
-  payload: unknown;
-}
 
 /** Minimal Drive v3 file objects relevant to us. */
 interface DriveFile {
@@ -95,18 +89,57 @@ export function loadGisScript(): Promise<void> {
 /* ─── OAuth token cache ─────────────────────────────────────────────────── */
 
 const TOKEN_KEY = "needmusic:gdrive:token";
+const TOKEN_EXPIRES_KEY = "needmusic:gdrive:token_expires";
+const REFRESH_KEY = "needmusic:gdrive:refresh";
 
-/** Persist the short-lived access token in memory + sessionStorage. */
-export function cacheToken(token: string | null): void {
+/** Persist the access token (and expiry) in localStorage so the user stays
+ *  signed in across app restarts. `expiresInSec` is from OAuth; 0/absent = unknown. */
+export function cacheToken(token: string | null, expiresInSec?: number): void {
   try {
-    if (token) sessionStorage.setItem(TOKEN_KEY, token);
-    else sessionStorage.removeItem(TOKEN_KEY);
+    if (token) {
+      localStorage.setItem(TOKEN_KEY, token);
+      if (expiresInSec && expiresInSec > 0) {
+        localStorage.setItem(TOKEN_EXPIRES_KEY, String(Date.now() + expiresInSec * 1000));
+      } else {
+        localStorage.removeItem(TOKEN_EXPIRES_KEY);
+      }
+    } else {
+      localStorage.removeItem(TOKEN_KEY);
+      localStorage.removeItem(TOKEN_EXPIRES_KEY);
+    }
   } catch { /* storage unavailable */ }
 }
 
-/** Return a cached token from the previous page load, if any. */
+/** Return a cached token from the previous app load, if any and not expired. */
 export function getCachedToken(): string {
-  try { return sessionStorage.getItem(TOKEN_KEY) || ""; } catch { return ""; }
+  try {
+    const exp = localStorage.getItem(TOKEN_EXPIRES_KEY);
+    if (exp && Number(exp) && Number(exp) <= Date.now()) return ""; // expired
+    return localStorage.getItem(TOKEN_KEY) || "";
+  } catch { return ""; }
+}
+
+/** Access token expiry timestamp (ms), or 0 if unknown/not stored. */
+export function getCachedTokenExpiry(): number {
+  try { return Number(localStorage.getItem(TOKEN_EXPIRES_KEY)) || 0; } catch { return 0; }
+}
+
+/** Persist a refresh token (allows silent re-auth after the access token expires). */
+export function cacheRefreshToken(refresh: string | null): void {
+  try {
+    if (refresh) localStorage.setItem(REFRESH_KEY, refresh);
+    else localStorage.removeItem(REFRESH_KEY);
+  } catch { /* ignore */ }
+}
+
+export function getCachedRefreshToken(): string {
+  try { return localStorage.getItem(REFRESH_KEY) || ""; } catch { return ""; }
+}
+
+/** Clear every cached credential (token, refresh, expires). */
+export function clearCachedCredentials(): void {
+  cacheToken(null);
+  cacheRefreshToken(null);
 }
 
 /* ─── Drive REST helpers ────────────────────────────────────────────────── */
@@ -268,71 +301,97 @@ export async function downloadAudioFile(token: string, fileId: string): Promise<
  * Search the user's `appDataFolder` for `app_data.json`. If present, download
  * its content (`alt=media`) and return the parsed envelope; otherwise null.
  */
-export async function fetchDriveData(token: string): Promise<DriveSyncEnvelope | null> {
-  const file = await findAppDataFile(token, SYNC_FILE_NAME);
-  if (!file) return null;
-  const raw = await downloadFileContent(token, file.id);
+/* ─── Per-device sync files (v2 model) ──────────────────────────────────── */
+
+/**
+ * List every device's sync file in the appDataFolder. Returns each file's id
+ * plus the deviceId extracted from its `sync-<deviceId>.json` name.
+ */
+export async function listSyncFiles(token: string): Promise<{ fileId: string; deviceId: string }[]> {
+  const q = encodeURIComponent(`'appDataFolder' in parents and trashed=false`);
+  const res = await gfetch(token, `/files?spaces=appDataFolder&q=${q}&fields=files(id,name)&pageSize=1000`);
+  const data = await res.json();
+  const files: DriveFile[] = data?.files ?? [];
+  return files
+    .filter((f) => typeof f.name === "string" && f.name.startsWith(SYNC_FILE_PREFIX) && f.name.endsWith(".json"))
+    .map((f) => ({ fileId: f.id, deviceId: f.name.slice(SYNC_FILE_PREFIX.length, -".json".length) }));
+}
+
+/** Download and parse one device's sync file (null when missing/corrupt). */
+export async function fetchDeviceFile(token: string, fileId: string): Promise<DeviceSyncFile | null> {
+  const raw = await downloadFileContent(token, fileId);
   if (!raw || !raw.trim()) return null;
   try {
     const parsed = JSON.parse(raw);
     if (!parsed || typeof parsed !== "object") return null;
-    return parsed as DriveSyncEnvelope;
+    return parsed as DeviceSyncFile;
   } catch {
-    // Corrupt/legacy blob — treat as absent so a clean one is written on save.
-    return null;
+    return null; // corrupt/legacy blob — ignore
   }
 }
 
 /**
- * Persist `payload` into `app_data.json` in `appDataFolder`.
- * - If the file already exists → content is updated (media upload).
- * - If it does not → create (with `parents: ['appDataFolder']`) then fill content.
- * Content is written through the `/upload/...?uploadType=media` endpoint with a
- * plain JSON body (no multipart), which Google accepts reliably.
+ * Create or update THIS device's own `sync-<deviceId>.json`. Only ever touches
+ * this device's file, so concurrent devices never race on the same file.
+ * Returns the file id (caller caches it to skip the find on the next push).
  */
-export async function saveDriveData(
+export async function saveOwnSyncFile(
   token: string,
-  envelope: DriveSyncEnvelope,
-): Promise<void> {
-  const content = JSON.stringify(envelope);
-  const existing = await findAppDataFile(token, SYNC_FILE_NAME);
+  file: DeviceSyncFile,
+  existingFileId?: string | null,
+): Promise<string> {
+  const content = JSON.stringify(file);
+  const name = `${SYNC_FILE_PREFIX}${file.deviceId}.json`;
+  if (existingFileId) {
+    await uploadMedia(token, existingFileId, content);
+    return existingFileId;
+  }
+  const existing = await findAppDataFile(token, name);
   if (existing) {
     await uploadMedia(token, existing.id, content);
-  } else {
-    const created = await createMetadataFile(token, SYNC_FILE_NAME);
-    await uploadMedia(token, created.id, content);
+    return existing.id;
   }
+  const created = await createMetadataFile(token, name);
+  await uploadMedia(token, created.id, content);
+  return created.id;
+}
+
+/** List every file currently in the appDataFolder (used for a full wipe). */
+async function listAllAppDataFiles(token: string): Promise<DriveFile[]> {
+  const res = await gfetch(token, `/files?spaces=appDataFolder&fields=files(id,name)&pageSize=1000`);
+  const data = await res.json();
+  return (data?.files ?? []) as DriveFile[];
 }
 
 /**
- * Basic timestamp-based merge: the newer `lastUpdated` wins. When timestamps
- * are (near) equal, deeper-than-a-field merge is intentionally avoided — the
- * local copy wins to guarantee convergence (both devices end on the same blob).
- *
- * Ties are broken by deviceId so that two devices that write in the same
- * millisecond still converge deterministically.
+ * Permanently delete ALL data stored in this app's Google Drive appDataFolder —
+ * the `app_data.json` sync envelope plus every uploaded audio file. Also clears
+ * the locally-cached Drive sign-in/token so the app returns to a clean, unsigned
+ * state. Use this to fully reset cross-device sync ("clean everything").
+ * Throws DriveAuthError on 401 (caller should invalidate auth).
  */
-export function resolveConflicts(
-  localData: DriveSyncEnvelope | null,
-  driveData: DriveSyncEnvelope | null,
-): DriveSyncEnvelope {
-  if (!localData) return driveData!;
-  if (!driveData) return localData;
-
-  const tLocal = parseTs(localData.lastUpdated);
-  const tDrive = parseTs(driveData.lastUpdated);
-  if (tDrive > tLocal) return driveData;
-  if (tLocal > tDrive) return localData;
-  // Equal timestamps: deterministic tie-break so both converge to one blob.
-  return (driveData.deviceId || "") > (localData.deviceId || "") ? driveData : localData;
+export async function clearAllDriveData(
+  token: string,
+  clearLocalAuth: () => void,
+): Promise<void> {
+  const files = await listAllAppDataFiles(token);
+  for (const f of files) {
+    // DELETE removes the file permanently (no trash in appDataFolder).
+    const res = await fetch(`${DRIVE_API}/files/${encodeURIComponent(f.id)}`, {
+      method: "DELETE",
+      headers: { Authorization: `Bearer ${token}` },
+    });
+    if (res.status === 401) throw new DriveAuthError("Access token expired — please sign in again.");
+    if (!res.ok && res.status !== 404) {
+      const detail = `HTTP ${res.status}`;
+      throw new DriveApiError(detail, res.status);
+    }
+  }
+  // Clear local tokens/account/release the session so we start unsigned.
+  clearCachedCredentials();
+  clearLocalAuth();
 }
 
-/** Prefer the timestamps of a and b; equal when both null (fresh). */
-function parseTs(ts?: string): number {
-  if (!ts) return Number.NEGATIVE_INFINITY;
-  const n = Date.parse(ts);
-  return Number.isFinite(n) ? n : Number.NEGATIVE_INFINITY;
-}
 
 /* ─── Errors ────────────────────────────────────────────────────────────── */
 

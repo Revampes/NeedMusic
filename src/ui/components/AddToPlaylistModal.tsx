@@ -11,8 +11,9 @@ interface SavedPlaylist {
 interface AddToPlaylistModalProps {
   track: Track;
   onClose: () => void;
-  /** Optional callback fired after any playlist mutation so the parent can re-sync the LAN server. */
-  onChanged?: () => void;
+  /** Optional callback fired after any playlist mutation. Passed the ids of the
+   *  playlists that were touched so the parent can mark them as synced here. */
+  onChanged?: (touchedPlaylistIds: string[]) => void;
 }
 
 /**
@@ -54,7 +55,7 @@ const AddToPlaylistModal: React.FC<AddToPlaylistModalProps> = ({ track, onClose,
         await db.addTrackToPlaylist(id, track.id);
       }
 
-      onChanged?.();
+      onChanged?.(targets);
       onClose();
     } finally {
       setBusy(false);

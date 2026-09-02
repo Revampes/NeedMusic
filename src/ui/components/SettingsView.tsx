@@ -8,11 +8,9 @@ import { Track } from "@core/models/Track";
 import { IconFolder, IconVolume, IconPalette, IconSettings, IconRocket, IconCheck, IconAlert } from "@ui/components/Icons";
 import EqSettings from "@ui/components/EqSettings";
 import HotkeySettings from "@ui/components/HotkeySettings";
-import GoogleDriveSyncPanel from "@ui/components/GoogleDriveSyncPanel";
 
 interface Props {
   onTracksLoaded: (tracks: Track[]) => void;
-  driveSync?: React.ComponentProps<typeof GoogleDriveSyncPanel>;
 }
 type Settings = Record<string, string>;
 
@@ -50,7 +48,7 @@ const BACKGROUND_STYLES = [
   { value: "custom", label: "Custom" },
 ];
 
-const SettingsView: React.FC<Props> = ({ onTracksLoaded, driveSync }) => {
+const SettingsView: React.FC<Props> = ({ onTracksLoaded }) => {
   const [settings, setSettings] = useState<Settings>(DEFAULTS);
   const [scanPath, setScanPath] = useState("");
   const [scanning, setScanning] = useState(false);
@@ -487,20 +485,6 @@ const SettingsView: React.FC<Props> = ({ onTracksLoaded, driveSync }) => {
         )}
       </section>
 
-      {/* ── Google Drive Sync (cross-device) ── */}
-      {driveSync && (
-        <GoogleDriveSyncPanel
-          signedIn={driveSync.signedIn}
-          account={driveSync.account}
-          status={driveSync.status}
-          hasConfig={driveSync.hasConfig}
-          onSignIn={driveSync.onSignIn}
-          onSignOut={driveSync.onSignOut}
-          onRunSync={driveSync.onRunSync}
-          onOpenGuide={driveSync.onOpenGuide}
-        />
-      )}
-
       {/* ── LAN Sync (experimental) ── */}
       <section><h3><IconSettings size={16} style={{ marginRight: 6 }} />LAN Sync <span style={{ fontSize:10, color:"var(--text-tertiary)", fontWeight:400 }}>(experimental)</span></h3>
         <p style={{ fontSize:12, color:"var(--text-tertiary)", marginBottom:10, lineHeight:1.5 }}>
@@ -580,7 +564,14 @@ const SettingsView: React.FC<Props> = ({ onTracksLoaded, driveSync }) => {
         <label className="settings-check"><input type="checkbox" checked={settings.autoStart==="true"} onChange={async e => {
           const enable = e.target.checked;
           await save("autoStart", enable ? "true" : "false");
-          await invoke("set_autostart", { enable });
+          try {
+            await invoke("set_autostart", { enable });
+          } catch (err: any) {
+            alert(`Start on login: ${String(err?.message || err)}`);
+            // Revert the toggle so the setting reflects reality.
+            await save("autoStart", enable ? "false" : "true");
+            e.target.checked = !enable;
+          }
         }} /> Start on login <span style={{ fontSize:10, color:"var(--text-tertiary)", marginLeft:4 }}>(launches when you sign in)</span></label>
       </section>
 

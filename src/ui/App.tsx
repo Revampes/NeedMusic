@@ -16,6 +16,7 @@ import { CustomContextMenu, ContextMenuEntry } from "@ui/components/CustomContex
 import ProgressBar from "@ui/components/ProgressBar";
 import PlaylistsView from "@ui/components/PlaylistsView";
 import SettingsView from "@ui/components/SettingsView";
+import GoogleDriveSyncPanel from "@ui/components/GoogleDriveSyncPanel";
 import OnlineSearchView from "@ui/components/OnlineSearchView";
 import CustomTitleBar from "@ui/components/CustomTitleBar";
 import QueuePanel from "@ui/components/QueuePanel";
@@ -23,6 +24,7 @@ import LyricsPanel from "@ui/components/LyricsPanel";
 import MarqueeText from "@ui/components/MarqueeText";
 import { useDesktopDriveSync, configureDesktopGoogleClientId } from "@ui/useDesktopDriveSync";
 import { DESKTOP_GOOGLE_CLIENT_ID, DESKTOP_GOOGLE_CLIENT_SECRET } from "@core/services/cloudConfig";
+import { songKeyOf } from "@core/services/cloudsync";
 
 // Configure the desktop build's Google OAuth client id once at module load.
 configureDesktopGoogleClientId(DESKTOP_GOOGLE_CLIENT_ID);
@@ -32,7 +34,7 @@ import {
   IconMusic, IconImage, IconPrevious, IconPlay, IconPause, IconNext, IconStop,
   IconRepeatOff, IconRepeat, IconRepeatOne, IconShuffle, IconVolume,
   IconClock, IconPlus, IconDisc, IconMic, IconGlobe, IconClose, IconHome,
-  IconAlert,
+  IconAlert, IconLogin,
   IconLyrics,
 } from "@ui/components/Icons";
 import SplashScreen from "@ui/components/SplashScreen";
@@ -538,10 +540,14 @@ const App: React.FC = () => {
     const next = force ?? !track.isFavorite;
     track.isFavorite = next;
     await DatabaseManager.getInstance().setFavorite(track.id, next);
+    // Mark this song as favorite-touched on this device so the LWW sync honors
+    // this toggle (favorite AND un-favorite both propagate to other devices).
+    driveSync.touchFavorite(songKeyOf(track));
     setTracks([...tracks]);
     setPlaylistVersion((v) => v + 1); // favorites playlist changed → re-sync LAN
     if (player.currentTrack?.id === track.id) setPlayer((p) => ({ ...p, isFavorite: next }));
-  }, [tracks, player.currentTrack]);
+    if (driveSync.signedIn) driveSync.runSync();
+  }, [tracks, player.currentTrack, driveSync]);
 
   const handleRemoveTrack = useCallback((track: Track) => {
     // Ask for confirmation before permanently deleting anything.
@@ -569,8 +575,18 @@ const App: React.FC = () => {
     await LibraryManager.getInstance().removeTrack(track.id);
     setTracks(LibraryManager.getInstance().getAllTracks());
     setPlaylistVersion((v) => v + 1); // cascade may have touched playlists → re-sync LAN
+    // Record an explicit deletion so it propagates to Drive and other devices.
+    // Always record locally (persisted), even when not signed in — otherwise a
+    // track that has a Drive copy (or a stale record) would be re-materialized
+    // on the next sync and appear to "come back" after deletion.
+    driveSync.queueDeletion(songKeyOf(track));
+    if (driveSync.signedIn) {
+      // Push the deletion to Drive immediately (like the web app does) so a
+      // removed track can't be pulled back from Drive before the periodic sync.
+      driveSync.runSync();
+    }
     setPendingDelete(null);
-  }, [player.currentTrack, engine]);
+  }, [player.currentTrack, engine, driveSync]);
 
   const handleTitleChange = useCallback(async (track: Track, newTitle: string) => {
     const db = DatabaseManager.getInstance();
@@ -640,6 +656,7 @@ const App: React.FC = () => {
           <div className={`icon-nav-item ${activeTab === "Online" ? "active" : ""}`} onClick={() => setActiveTab("Online")} title="Online"><IconGlobe size={18} /></div>
           <div className="icon-nav-spacer" />
           <div className={`icon-nav-item ${activeTab === "Settings" ? "active" : ""}`} onClick={() => setActiveTab("Settings")} title="Settings"><IconSettings size={18} /></div>
+          <div className={`icon-nav-item ${activeTab === "Drive" ? "active" : ""}`} onClick={() => setActiveTab("Drive")} title="Google Drive Sync"><IconLogin size={18} /></div>
         </nav>
         <div className="main-area">
           {/* Inline search bar */}
@@ -683,24 +700,34 @@ const App: React.FC = () => {
                  onTrackSaved={() => setTracks(LibraryManager.getInstance().getAllTracks())}
                />
              ) :
+             activeTab === "Drive" ? (
+               <div className="track-list" style={{ padding: 24 }}>
+                 <GoogleDriveSyncPanel
+                   signedIn={driveSync.signedIn}
+                   account={driveSync.account}
+                   status={driveSync.status}
+                   hasConfig={driveSync.hasConfig}
+                   onSignIn={driveSync.signIn}
+                   onSignOut={driveSync.signOut}
+                   onUpload={driveSync.upload}
+                   onDownload={driveSync.download}
+                   onClean={() => {
+                     if (window.confirm("Delete ALL Google Drive sync data (sync list + uploaded audio), reset this device's sync state, AND remove every track from this device (library + audio files)? This is permanent and cannot be undone.")) {
+                       driveSync.clean().catch(() => { /* keep UI stable */ });
+                     }
+                   }}
+                   onOpenGuide={() => {
+                     try { window.open("https://github.com/Revampes/NeedMusic/blob/main/docs/google-drive-sync.md", "_blank"); } catch { /* ignore */ }
+                   }}
+                 />
+               </div>
+             ) :
              activeTab === "Settings" ? (
                <SettingsView
                  onTracksLoaded={setTracks}
-                 driveSync={{
-                   signedIn: driveSync.signedIn,
-                   account: driveSync.account,
-                   status: driveSync.status,
-                   hasConfig: driveSync.hasConfig,
-                   onSignIn: driveSync.signIn,
-                   onSignOut: driveSync.signOut,
-                   onRunSync: driveSync.runSync,
-                   onOpenGuide: () => {
-                     try { window.open("https://github.com/Revampes/NeedMusic/blob/main/docs/google-drive-sync.md", "_blank"); } catch { /* ignore */ }
-                   },
-                 }}
                />
              ) :
-             <TrackListView tracks={filteredTracks} currentTrack={ct} onPlay={handlePlayTrack} onToggleFav={handleToggleFavorite} onRemove={handleRemoveTrack} onTitleChange={handleTitleChange} onPlaylistChanged={() => setPlaylistVersion((v) => v + 1)} />}
+             <TrackListView tracks={filteredTracks} currentTrack={ct} onPlay={handlePlayTrack} onToggleFav={handleToggleFavorite} onRemove={handleRemoveTrack} onTitleChange={handleTitleChange} onPlaylistChanged={(ids) => { ids?.forEach((id) => driveSync.touchPlaylist(id)); setPlaylistVersion((v) => v + 1); }} />}
           </div>
         </div>
           {showLyrics ? (
@@ -808,7 +835,7 @@ export default App;
 
 // ─── Sub-Views ────────────────────────────────────────
 
-const TrackListView: React.FC<{ tracks: Track[]; currentTrack: ITrack | null; onPlay: (t: Track) => void; onToggleFav: (t: Track) => void; onRemove: (t: Track) => void; onTitleChange: (t: Track, newTitle: string) => void; onPlaylistChanged?: () => void }> =
+const TrackListView: React.FC<{ tracks: Track[]; currentTrack: ITrack | null; onPlay: (t: Track) => void; onToggleFav: (t: Track) => void; onRemove: (t: Track) => void; onTitleChange: (t: Track, newTitle: string) => void; onPlaylistChanged?: (touchedPlaylistIds: string[]) => void }> =
   ({ tracks, currentTrack, onPlay, onToggleFav, onRemove, onTitleChange, onPlaylistChanged }) => {
     const [editingId, setEditingId] = React.useState<string | null>(null);
     const [editValue, setEditValue] = React.useState("");

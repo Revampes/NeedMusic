@@ -73,3 +73,14 @@ export async function removeDownloadedAudio(id: string): Promise<void> {
     tx.onerror = () => { db.close(); reject(tx.error); };
   });
 }
+
+/** Delete EVERY downloaded audio entry from IndexedDB (used by "clean everything"). */
+export async function clearAllDownloadedAudio(): Promise<void> {
+  const db = await openDb();
+  return new Promise((resolve, reject) => {
+    const tx = db.transaction(STORE, "readwrite");
+    const req = tx.objectStore(STORE).clear();
+    req.onsuccess = () => { db.close(); resolve(); };
+    req.onerror = () => { db.close(); reject(req.error); };
+  });
+}

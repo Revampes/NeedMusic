@@ -16,7 +16,9 @@ export interface GoogleSyncPanelProps {
   hasConfig: boolean;
   onSignIn: () => void;
   onSignOut: () => void;
-  onRunSync: () => void;
+  onUpload: () => void;
+  onDownload: () => void;
+  onClean: () => void;
   onOpenGuide: () => void;
 }
 
@@ -40,7 +42,9 @@ const GoogleDriveSyncPanel: React.FC<GoogleSyncPanelProps> = ({
   hasConfig,
   onSignIn,
   onSignOut,
-  onRunSync,
+  onUpload,
+  onDownload,
+  onClean,
   onOpenGuide,
 }) => {
   const busy = status.state === "authorizing" || status.state === "syncing";
@@ -57,9 +61,9 @@ const GoogleDriveSyncPanel: React.FC<GoogleSyncPanelProps> = ({
         </span>
       </h3>
       <p style={{ fontSize: 11, color: "var(--text-secondary)", marginBottom: 10, lineHeight: 1.5 }}>
-        Sync your favorites and playlists to your own Google Drive (private{" "}
-        <code>appDataFolder</code>) so they follow you to any device — no NeedMusic
-        account, no charge to your visible Drive quota.{" "}
+        Store your tracks/favorites/playlists in your own Google Drive (private{" "}
+        <code>appDataFolder</code>). <strong>Upload</strong> pushes this device to Drive;{" "}
+        <strong>Download</strong> pulls Drive tracks not already here. No automatic sync.{" "}
         <button
           onClick={onOpenGuide}
           style={{ background: "none", border: "none", color: "var(--accent-primary)", cursor: "pointer", fontWeight: 600, padding: 0, fontSize: 11 }}
@@ -101,11 +105,18 @@ const GoogleDriveSyncPanel: React.FC<GoogleSyncPanelProps> = ({
             </span>
           </div>
           <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
-            <button className="settings-btn" onClick={onRunSync} disabled={busy} style={{ fontSize: 12 }}>
-              {busy ? "Syncing…" : "Sync now"}
+            <button className="settings-btn" onClick={onUpload} disabled={busy} style={{ fontSize: 12 }}>
+              Upload
+            </button>
+            <button className="settings-btn" onClick={onDownload} disabled={busy} style={{ fontSize: 12 }}>
+              Download
             </button>
             <button className="settings-btn" onClick={onSignOut} style={{ fontSize: 12, color: "var(--color-error)", background: "transparent", border: "1px solid var(--color-error)" }}>
               Sign out
+            </button>
+            <button className="settings-btn" onClick={onClean} disabled={busy} title="Delete all Drive sync data + reset local sync state"
+              style={{ fontSize: 12, color: "var(--color-error)", background: "transparent", border: "1px solid var(--color-error)", opacity: busy ? 0.5 : 1 }}>
+              🧹 Clean everything
             </button>
           </div>
         </>
