@@ -1,2 +1,5 @@
 [permissions]
 allow = ["Edit"]
+
+[sandbox]
+allow_write = ["${HOME}/AppData/Local/Temp"]

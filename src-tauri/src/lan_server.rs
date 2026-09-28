@@ -1099,13 +1099,18 @@ mod tests {
         assert!(resp.contains("NeedMusic"), "root must contain the app: {resp:?}");
 
         // ── 2) Static bundle WITHOUT token → served (UI needs no token) ──
-        // Grab the real hashed asset path from the served index.html.
+        // Grab the real hashed asset path from the served index.html. Pick the
+        // first *local* (`./…`) script source — index.html also references
+        // external scripts (e.g. accounts.google.com/gsi/client), which are not
+        // ours to serve.
         let js_asset = resp
             .split("src=\"")
-            .nth(1)
-            .and_then(|s| s.split('"').next())
+            .skip(1)
+            .filter_map(|s| s.split('"').next())
+            .find(|s| s.starts_with("./"))
             .unwrap_or("assets/index.js")
-            .trim_start_matches("./");
+            .trim_start_matches("./")
+            .to_string();
         let resp = http_get(addr, &format!("GET /{js_asset} HTTP/1.1\r\nHost: t\r\n\r\n"));
         assert!(resp.starts_with("HTTP/1.1 200 OK"), "assets must be served: {resp:?}");
         assert!(resp.contains("text/javascript"), "assets must have js mime: {resp:?}");

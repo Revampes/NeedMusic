@@ -7,11 +7,13 @@
 
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 
 #[cfg(target_os = "windows")]
 use std::os::windows::process::CommandExt;
 use std::time::{SystemTime, UNIX_EPOCH};
+
+use reqwest::cookie::{CookieStore, Jar};
 
 use id3::TagLike;
 
@@ -103,12 +105,164 @@ const MIXIN_TABLE: [usize; 32] = [
 
 const USER_AGENT: &str = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36";
 
+/// reqwest doesn't send cookies unless the feature is on and a cookie store is
+/// set. Bilibili's risk-control (RISKCTRL) 412s requests that carry no cookies
+/// (it wants `buvid3`), returning an HTML error page. We keep the store in a
+/// static so `buvid3`/`buvid4` can be injected into it explicitly. See
+/// `ensure_bili_warmed` / `retry_on_412`.
+static HTTP_CLIENT: Mutex<Option<reqwest::blocking::Client>> = Mutex::new(None);
+static COOKIE_JAR: Mutex<Option<Arc<Jar>>> = Mutex::new(None);
+
+/// The shared cookie jar used by `http_client()`. Holding it ourselves (instead
+/// of letting reqwest build an internal one) is what lets us seed the
+/// anonymous-visitor cookies that Bilibili's risk control demands.
+fn cookie_jar() -> Arc<Jar> {
+    let mut guard = COOKIE_JAR.lock().unwrap();
+    if let Some(ref j) = *guard {
+        return j.clone();
+    }
+    let jar = Arc::new(Jar::default());
+    *guard = Some(jar.clone());
+    jar
+}
+
 fn http_client() -> reqwest::blocking::Client {
-    reqwest::blocking::Client::builder()
+    let mut guard = HTTP_CLIENT.lock().unwrap();
+    if let Some(ref c) = *guard {
+        return c.clone();
+    }
+
+    // Browser-like defaults: Bilibili's risk engine flags requests whose headers
+    // don't look like a real XHR from the site.
+    let mut headers = reqwest::header::HeaderMap::new();
+    headers.insert(
+        reqwest::header::ACCEPT,
+        "application/json, text/plain, */*".parse().unwrap(),
+    );
+    headers.insert(
+        reqwest::header::ACCEPT_LANGUAGE,
+        "en-US,en;q=0.9,zh-CN;q=0.8".parse().unwrap(),
+    );
+
+    let client = reqwest::blocking::Client::builder()
         .user_agent(USER_AGENT)
         .timeout(std::time::Duration::from_secs(30))
+        .cookie_provider(cookie_jar())
+        .default_headers(headers)
         .build()
-        .expect("Failed to build HTTP client")
+        .expect("Failed to build HTTP client");
+    *guard = Some(client.clone());
+    client
+}
+
+/// True when the shared cookie jar already carries `name` for bilibili.com.
+fn jar_has_cookie(name: &str) -> bool {
+    let url = match "https://www.bilibili.com/".parse::<reqwest::Url>() {
+        Ok(u) => u,
+        Err(_) => return false,
+    };
+    match cookie_jar().cookies(&url) {
+        Some(v) => v
+            .to_str()
+            .map(|s| s.contains(&format!("{}=", name)))
+            .unwrap_or(false),
+        None => false,
+    }
+}
+
+/// Ask Bilibili's fingerprint endpoint for anonymous-visitor ids and store them
+/// in the cookie jar. This is the canonical way to obtain `buvid3`/`buvid4`
+/// (the homepage alone often does not set them for flagged clients).
+fn seed_buvid_via_spi() -> bool {
+    let client = http_client();
+    let resp = match client
+        .get("https://api.bilibili.com/x/frontend/finger/spi")
+        .header("Referer", "https://www.bilibili.com/")
+        .send()
+    {
+        Ok(r) => r,
+        Err(_) => return false,
+    };
+    let body = match resp.text() {
+        Ok(b) => b,
+        Err(_) => return false,
+    };
+    let json: serde_json::Value = match serde_json::from_str(&body) {
+        Ok(j) => j,
+        Err(_) => return false,
+    };
+
+    let b3 = json["data"]["b_3"].as_str().unwrap_or("");
+    let b4 = json["data"]["b_4"].as_str().unwrap_or("");
+    if b3.is_empty() {
+        return false;
+    }
+
+    let site = match "https://www.bilibili.com/".parse::<reqwest::Url>() {
+        Ok(u) => u,
+        Err(_) => return false,
+    };
+    let jar = cookie_jar();
+    jar.add_cookie_str(
+        &format!("buvid3={}; Domain=.bilibili.com; Path=/", b3),
+        &site,
+    );
+    if !b4.is_empty() {
+        jar.add_cookie_str(
+            &format!("buvid4={}; Domain=.bilibili.com; Path=/", b4),
+            &site,
+        );
+    }
+    true
+}
+
+/// Make sure the shared cookie jar holds Bilibili's anonymous-visitor cookies
+/// (`buvid3`/`buvid4`) before hitting endpoints that risk-control guards.
+///
+/// Unlike a one-shot "warmed" flag this is *idempotent and self-healing*: it
+/// re-checks the jar every call and re-seeds when the cookies are missing (e.g.
+/// the jar was cleared, or an earlier seed attempt failed). A failed attempt is
+/// never cached as success — that stale flag was exactly why the old code could
+/// 412 forever after one bad warm-up.
+fn ensure_bili_warmed() {
+    if jar_has_cookie("buvid3") {
+        return;
+    }
+    if seed_buvid_via_spi() {
+        return;
+    }
+    // Fallback: the homepage sets buvid3 on some clients/networks.
+    let _ = http_client()
+        .get("https://www.bilibili.com/")
+        .header("Referer", "https://www.bilibili.com/")
+        .send();
+}
+
+/// Retry that resolves Bilibili's HTTP 412 risk-control block.
+///
+/// Bilibili intermittently answers API calls that carry no visitor cookie with
+/// HTTP 412 + an HTML page (no JSON), which surfaces to the user as
+/// `Invalid … response (HTTP 412): expected value at line 1 column 1.`
+/// The block clears once a `buvid3` anonymous-visitor cookie is present, so we
+/// seed it through the shared jar and run `body` again (a couple of times with
+/// a short backoff, in case the cookie needs a moment to take effect).
+fn retry_on_412<F>(body: F) -> Result<reqwest::blocking::Response, reqwest::Error>
+where
+    F: Fn() -> Result<reqwest::blocking::Response, reqwest::Error>,
+{
+    let mut resp = body()?;
+    for attempt in 0..2 {
+        if resp.status() != reqwest::StatusCode::PRECONDITION_FAILED {
+            return Ok(resp);
+        }
+        // 412 — (re)seed the buvid3 visitor cookie, then retry.
+        ensure_bili_warmed();
+        if attempt > 0 {
+            std::thread::sleep(std::time::Duration::from_millis(300 * (attempt as u64 + 1)));
+        }
+        resp = body()?;
+    }
+    Ok(resp)
 }
 
 /// Fetch or refresh the Wbi signing keys from Bilibili's nav endpoint.
@@ -128,11 +282,14 @@ fn get_wbi_keys() -> Result<String, String> {
     }
 
     let client = http_client();
-    let resp = client
-        .get("https://api.bilibili.com/x/web-interface/nav")
-        .header("Referer", "https://www.bilibili.com/")
-        .send()
-        .map_err(|e| format!("Failed to fetch Wbi keys: {}", e))?;
+    let resp = retry_on_412(|| {
+        client
+            .get("https://api.bilibili.com/x/web-interface/nav")
+            .header("Referer", "https://www.bilibili.com/")
+            .header("Origin", "https://www.bilibili.com")
+            .send()
+    })
+    .map_err(|e| format!("Failed to fetch Wbi keys: {}", e))?;
 
     let json: serde_json::Value = resp
         .json()
@@ -248,16 +405,20 @@ fn fetch_json_with_retry(url: &str, label: &str) -> Result<serde_json::Value, St
     let client = http_client();
     let mut last_err = String::new();
 
-    for attempt in 0..3 {
+    for attempt in 0..=3 {
         if attempt > 0 {
             std::thread::sleep(std::time::Duration::from_millis(500 * (1 << (attempt - 1))));
         }
 
-        let resp = match client
-            .get(url)
-            .header("Referer", "https://www.bilibili.com/")
-            .send()
-        {
+        // 412 risk-control: warm the visitor cookie and retry (from the same
+        // cookie jar), so we don't just burn the whole budget on re-412ing.
+        let resp = match retry_on_412(|| {
+            client
+                .get(url)
+                .header("Referer", "https://www.bilibili.com/")
+                .header("Origin", "https://www.bilibili.com")
+                .send()
+        }) {
             Ok(r) => r,
             Err(e) => {
                 last_err = format!("{} request failed: {}", label, e);
@@ -283,6 +444,17 @@ fn fetch_json_with_retry(url: &str, label: &str) -> Result<serde_json::Value, St
         match serde_json::from_str::<serde_json::Value>(&body) {
             Ok(json) => return Ok(json),
             Err(e) => {
+                // If the body is HTML rather than JSON it's a Bilibili
+                // risk-control / captcha page, not a real API error — surface
+                // that instead of spraying raw HTML at the user.
+                if body.trim_start().starts_with('<') {
+                    last_err = format!(
+                        "{} blocked by Bilibili (HTTP {} — risk control / captcha page returned instead of JSON). This is usually temporary; try again in a moment.",
+                        label,
+                        status.as_u16()
+                    );
+                    continue;
+                }
                 let snippet: String = body
                     .chars()
                     .take(200)
@@ -442,8 +614,40 @@ fn get_cid(bvid: &str) -> Result<u64, String> {
 
 fn get_cid_inner(bvid: &str, attempt: u8) -> Result<u64, String> {
     if attempt >= 2 {
-        return Err("Bilibili API keeps rejecting the request (-799)".to_string());
+        return Err("Bilibili API keeps rejecting the request (-412 risk control)".to_string());
     }
+    // Make sure the shared cookie jar holds Bilibili's anonymous-visitor cookie
+    // (buvid3) *before* we hit the API. Without it Bilibili's risk engine
+    // answers with HTTP 412 + an HTML page, regardless of signing.
+    ensure_bili_warmed();
+
+    // ── Primary: `player/pagelist`. ──
+    // It exposes the same cid as `x/web-interface/view`, but Bilibili's risk
+    // control bans far fewer IPs on it. On the network where this 412'd, the
+    // `view` API answered `-412 "request was banned"` while `pagelist` returned
+    // `code=0` on the same request — yt-dlp uses `pagelist` for the same reason.
+    let pagelist_url = format!(
+        "https://api.bilibili.com/x/player/pagelist?bvid={}",
+        url_encode(bvid)
+    );
+    if let Ok(json) = fetch_json_with_retry(&pagelist_url, "video info") {
+        match json["code"].as_i64().unwrap_or(-1) {
+            0 => {
+                if let Some(cid) = json["data"][0]["cid"].as_u64() {
+                    return Ok(cid);
+                }
+            }
+            -799 => {
+                // Wbi keys expired — clear cache and retry once (already warmed).
+                let mut cache = WBI_CACHE.lock().unwrap();
+                *cache = None;
+                return get_cid_inner(bvid, attempt + 1);
+            }
+            _ => { /* fall through to the `view` fallback */ }
+        }
+    }
+
+    // ── Fallback: `x/web-interface/view` (blocked on some networks). ──
     let info_url = make_signed_url(
         "https://api.bilibili.com/x/web-interface/view",
         &[("bvid", bvid)],
@@ -453,12 +657,21 @@ fn get_cid_inner(bvid: &str, attempt: u8) -> Result<u64, String> {
 
     let code = json["code"].as_i64().unwrap_or(-1);
     if code == -799 {
+        // Wbi keys expired — clear cache and retry once (already warmed).
         let mut cache = WBI_CACHE.lock().unwrap();
         *cache = None;
         return get_cid_inner(bvid, attempt + 1);
     }
     if code != 0 {
         let msg = json["message"].as_str().unwrap_or("Unknown error");
+        if code == -412 {
+            return Err(
+                "Bilibili refused the video-info request (request was banned, -412). \
+                 This is Bilibili's anti-bot block on this network/IP, not an app fault. \
+                 It is usually temporary — wait a little and try again."
+                    .to_string(),
+            );
+        }
         return Err(format!("Video info API error ({}): {}", code, msg));
     }
 
@@ -869,6 +1082,9 @@ pub fn download_online_audio(
     }
 
     // Get the audio stream URL.
+    // `get_cid` (used here) resolves via `player/pagelist`, which still answers
+    // when Bilibili's risk control bans the `x/web-interface/view` endpoint
+    // with `-412 "request was banned"` on the current network.
     let audio_url = get_audio_url(bvid)?;
 
     // Determine file extension from the URL or default to m4a.
@@ -1393,5 +1609,62 @@ mod tests {
             .unwrap_or(false);
         assert!(ok, "installed ffmpeg must run: {}", path.display());
         println!("ffmpeg installed and verified at {}", path.display());
+    }
+
+    /// Live check that the hardened path actually obtains `buvid3`.
+    /// Run with: cargo test online::tests::seeds_buvid3_cookie -- --ignored --nocapture
+    #[test]
+    #[ignore = "hits the live Bilibili API"]
+    fn seeds_buvid3_cookie() {
+        assert!(!jar_has_cookie("buvid3"), "jar should start empty");
+        ensure_bili_warmed();
+        assert!(
+            jar_has_cookie("buvid3"),
+            "buvid3 must be present after ensure_bili_warmed()"
+        );
+        // The Wbi-signed nav call is the same path the view/playurl APIs use.
+        let keys = get_wbi_keys().expect("nav endpoint should answer once buvid3 is set");
+        assert!(!keys.is_empty(), "wbi mixed key must not be empty");
+        println!("buvid3 seeded; wbi key = {}", keys);
+    }
+
+    /// Live end-to-end check of the exact path that used to 412 with
+    /// "video info blocked by Bilibili": search → get_cid (player/pagelist) →
+    /// get_audio_url (playurl API) → audio CDN fetch.
+    /// Run with: cargo test online::tests::native_playback_path -- --ignored --nocapture
+    #[test]
+    #[ignore = "hits the live Bilibili API"]
+    fn native_playback_path() {
+        let search = search_bilibili("周杰伦").expect("search should succeed");
+        assert!(!search.results.is_empty(), "search should return results");
+        let bvid = search.results[0].bvid.clone();
+        println!("first result: {} ({})", search.results[0].title, bvid);
+
+        let cid = get_cid(&bvid).expect("video info (get_cid) must not 412");
+        assert!(cid > 0, "cid must be non-zero");
+
+        let url = get_audio_url(&bvid).expect("playurl must resolve an audio URL");
+        assert!(url.starts_with("http"), "audio URL should be absolute: {}", url);
+        println!("cid = {}, audio url = {}", cid, url);
+
+        // Verify the download leg too: the CDN must serve bytes for the
+        // resolved URL when we send the Bilibili Referer (exactly what
+        // `download_online_audio` does).
+        let client = http_client();
+        let mut resp = client
+            .get(&url)
+            .header("Referer", "https://www.bilibili.com/")
+            .header("Range", "bytes=0-1023")
+            .send()
+            .expect("audio CDN fetch should not fail at the transport level");
+        assert!(
+            resp.status().is_success(),
+            "audio CDN should serve the stream (got HTTP {})",
+            resp.status()
+        );
+        let mut buf = [0u8; 1024];
+        let n = std::io::Read::read(&mut resp, &mut buf).expect("should read audio bytes");
+        assert!(n > 0, "audio stream should not be empty");
+        println!("fetched {} bytes of audio", n);
     }
 }
