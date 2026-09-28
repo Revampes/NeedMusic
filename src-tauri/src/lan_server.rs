@@ -135,6 +135,13 @@ impl LanServer {
         if let Ok(mut f) = self.stop_flag.lock() {
             *f = false;
         }
+        // Publish "running" on THIS thread before spawning the accept loop:
+        // `url()` consults `is_running()`, so if the accept thread had not been
+        // scheduled yet, `start()` would wrongly return Err right after a
+        // successful bind.
+        if let Ok(mut r) = self.running.lock() {
+            *r = true;
+        }
         let token = load_or_create_token();
         if let Ok(mut t) = self.token.lock() {
             *t = token;
@@ -149,9 +156,6 @@ impl LanServer {
         let conns = self.conns.clone();
 
         let handle = thread::spawn(move || {
-            if let Ok(mut r) = running.lock() {
-                *r = true;
-            }
             loop {
                 if stop_flag.lock().map(|f| *f).unwrap_or(true) {
                     break;
@@ -213,7 +217,16 @@ impl LanServer {
         }
     }
 
+    /// The URL phones should open, e.g. `http://192.168.1.10:17963/?token=abc`.
+    ///
+    /// Errors when the server is not listening: `start()` writes the token, so
+    /// reporting a URL while stopped would hand the UI a bogus
+    /// `http://ip:17963/?token=` (empty token) and make it show "Stop Server"
+    /// for a server that was never started.
     pub fn url(&self) -> Result<String, String> {
+        if !self.is_running() {
+            return Err("LAN server is not running".to_string());
+        }
         let ip = lan_ip().ok_or("Cannot determine LAN IP address".to_string())?;
         let token = self.token.lock().map(|t| t.clone()).unwrap_or_default();
         Ok(format!("http://{}:{}/?token={}", ip, LAN_PORT, token))
@@ -786,6 +799,45 @@ fn lan_ip() -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// `url()` must only be advertised while the server is actually listening.
+    /// It previously reported `http://ip:17963/?token=` (empty token) even when
+    /// stopped, which made Settings show "Stop Server" for a server that was
+    /// never started.
+    #[test]
+    fn url_is_only_advertised_while_running() {
+        let server = LanServer::new();
+        assert!(!server.is_running(), "a fresh server must not be running");
+        assert!(
+            server.url().is_err(),
+            "a stopped server must not advertise a URL"
+        );
+
+        // Bind the real port; tolerate the case where something else holds it.
+        match server.start() {
+            Ok(url) => {
+                assert!(server.is_running(), "start() must publish running state");
+                assert!(url.starts_with("http://"), "start() must return the phone URL: {url}");
+                assert!(
+                    !url.ends_with("token="),
+                    "the advertised URL must carry a real token: {url}"
+                );
+                assert_eq!(
+                    server.url().unwrap(),
+                    url,
+                    "url() must match what start() returned"
+                );
+
+                server.stop();
+                assert!(!server.is_running(), "stop() must clear running state");
+                assert!(
+                    server.url().is_err(),
+                    "a stopped server must not advertise a URL"
+                );
+            }
+            Err(e) => eprintln!("skipping start() assertions — LAN port unavailable: {e}"),
+        }
+    }
 
     /// Recursively collect every embedded file (Dir::files() is non-recursive).
     fn collect_files<'a>(dir: &'a Dir<'static>) -> Vec<&'a include_dir::File<'static>> {

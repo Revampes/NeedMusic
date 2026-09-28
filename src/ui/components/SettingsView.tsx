@@ -75,7 +75,8 @@ const SettingsView: React.FC<Props> = ({ onTracksLoaded }) => {
     const sp = await db.getSetting("scanFolderPath"); if (sp) setScanPath(sp);
     // Restore appearance
     applyAllStyles(s);
-    // Reflect the auto-started LAN server (if running).
+    // Reflect the LAN server only if it is actually listening (the command
+    // errors when stopped, so the UI defaults to "Start Server").
     try { const u = await invoke<string>("lan_server_url"); if (u) setLanUrl(u); } catch { /* not running */ }
   })(); }, [db]);
 

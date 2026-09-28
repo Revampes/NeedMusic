@@ -17,7 +17,6 @@ import {
   syncableFromTracks,
   favoritesFromTracks,
   type SyncableState,
-  type SyncPlaylist,
   type SyncTrackMeta,
 } from "@core/services/cloudsync";
 

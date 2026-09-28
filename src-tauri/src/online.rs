@@ -1181,6 +1181,81 @@ pub fn is_ytdlp_available() -> bool {
         .unwrap_or(false)
 }
 
+/// The installed yt-dlp version string, if one is available.
+fn ytdlp_version() -> Option<String> {
+    let last_line = |out: &std::process::Output| -> Option<String> {
+        if !out.status.success() {
+            return None;
+        }
+        // Take the last non-empty stdout line: python may print warnings first.
+        let v = String::from_utf8_lossy(&out.stdout)
+            .lines()
+            .map(|l| l.trim())
+            .filter(|l| !l.is_empty())
+            .last()
+            .unwrap_or("")
+            .to_string();
+        if v.is_empty() { None } else { Some(v) }
+    };
+
+    for py in &["python", "python3"] {
+        let mut cmd = Command::new(py);
+        #[cfg(target_os = "windows")]
+        cmd.creation_flags(0x08000000);
+        if let Ok(out) = cmd.args(["-m", "yt_dlp", "--version"]).output() {
+            if let Some(v) = last_line(&out) {
+                return Some(v);
+            }
+        }
+    }
+
+    let mut cmd = Command::new("yt-dlp");
+    #[cfg(target_os = "windows")]
+    cmd.creation_flags(0x08000000);
+    cmd.arg("--version").output().ok().and_then(|o| last_line(&o))
+}
+
+/// Install yt-dlp when missing and upgrade it when outdated.
+///
+/// YouTube breaks older yt-dlp builds — first `Your yt-dlp version (...) is
+/// older than 90 days!`, then `ERROR: Requested format is not available` — so
+/// the app refreshes yt-dlp on every launch rather than asking the user to
+/// install or update it themselves. `pip install --upgrade` is a cheap no-op
+/// when already current. Never fatal: the error is returned so the caller can
+/// log it, and the app continues with whatever yt-dlp (if any) is present.
+pub fn ensure_ytdlp_updated() -> Result<String, String> {
+    // `--upgrade` covers both "install if missing" and "update if present".
+    let installers: &[&[&str]] = &[
+        &["python", "-m", "pip", "install", "--upgrade", "yt-dlp", "--quiet", "--disable-pip-version-check"],
+        &["python3", "-m", "pip", "install", "--upgrade", "yt-dlp", "--quiet", "--disable-pip-version-check"],
+        &["pip", "install", "--upgrade", "yt-dlp", "--quiet", "--disable-pip-version-check"],
+        &["pip3", "install", "--upgrade", "yt-dlp", "--quiet", "--disable-pip-version-check"],
+    ];
+
+    let mut last_err = String::from("no pip interpreter found");
+    for args in installers {
+        let mut cmd = Command::new(args[0]);
+        #[cfg(target_os = "windows")]
+        cmd.creation_flags(0x08000000);
+        match cmd.args(&args[1..]).output() {
+            Ok(out) if out.status.success() => {
+                // Report the version we ended up with (the pre-existing one if
+                // it was already current).
+                return Ok(ytdlp_version().unwrap_or_else(|| "up to date".to_string()));
+            }
+            Ok(out) => {
+                last_err = format!(
+                    "{} failed: {}",
+                    args[0],
+                    String::from_utf8_lossy(&out.stderr).trim()
+                );
+            }
+            Err(e) => last_err = format!("{}: {}", args[0], e),
+        }
+    }
+    Err(format!("Could not install/update yt-dlp ({})", last_err))
+}
+
 /// Find yt-dlp executable — tries yt-dlp first, then python -m yt_dlp, then auto-installs.
 fn find_ytdlp() -> Result<Command, String> {
     if is_ytdlp_available() {
@@ -1626,6 +1701,21 @@ mod tests {
         let keys = get_wbi_keys().expect("nav endpoint should answer once buvid3 is set");
         assert!(!keys.is_empty(), "wbi mixed key must not be empty");
         println!("buvid3 seeded; wbi key = {}", keys);
+    }
+
+    /// Live check that the yt-dlp bootstrap installs/updates and reports a
+    /// version. This is what runs on every app launch.
+    /// Run with: cargo test --lib online::tests::ytdlp_bootstrap -- --ignored --nocapture
+    #[test]
+    #[ignore = "runs pip install --upgrade yt-dlp (network)"]
+    fn ytdlp_bootstrap() {
+        let version = ensure_ytdlp_updated().expect("yt-dlp should install or update");
+        println!("yt-dlp ready, version = {}", version);
+        assert!(!version.is_empty(), "bootstrap must report a version");
+
+        // The bootstrap must leave a *usable* yt-dlp behind.
+        let resolved = ytdlp_version().expect("yt-dlp must resolve after bootstrap");
+        assert_eq!(resolved, version, "reported version must match the installed one");
     }
 
     /// Live end-to-end check of the exact path that used to 412 with

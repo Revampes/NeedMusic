@@ -603,6 +603,17 @@ fn ensure_ffmpeg_installed() {
     });
 }
 
+/// Install/update yt-dlp in the background (fire-and-forget) on every launch:
+/// YouTube stops working with a stale yt-dlp, and the user should never have to
+/// install or update it themselves.
+#[tauri::command]
+fn ensure_ytdlp_ready() {
+    std::thread::spawn(|| match online::ensure_ytdlp_updated() {
+        Ok(v) => println!("[NeedMusic] yt-dlp ready (version {})", v),
+        Err(e) => eprintln!("[NeedMusic] yt-dlp bootstrap failed: {}", e),
+    });
+}
+
 /// Batch file-existence check (used to reconcile the library after MP3
 /// conversion deletes the originals).
 #[tauri::command]
@@ -1224,6 +1235,7 @@ pub fn run() {
             get_default_download_dir,
             convert_saved_audio_to_mp3,
             ensure_ffmpeg_installed,
+            ensure_ytdlp_ready,
             files_exist,
             is_ytdlp_available,
             proxy_image,

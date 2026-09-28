@@ -1286,7 +1286,7 @@ const WebApp: React.FC = () => {
                       // Wipe this device's local library + stored/downloaded audio.
                       webTrackStore.clear();
                       persistTracks([]);
-                      for (const [id, url] of downloadedRef.current) { try { URL.revokeObjectURL(url); } catch { /* ignore */ } }
+                      for (const url of downloadedRef.current.values()) { try { URL.revokeObjectURL(url); } catch { /* ignore */ } }
                       downloadedRef.current.clear();
                       downloadedFormatRef.current.clear();
                       clearAllDownloadedAudio().catch(() => { /* best-effort */ });

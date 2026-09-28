@@ -93,6 +93,13 @@ export class DatabaseManager {
       );
     `);
 
+    // Migration: track *listened seconds* per day (added for the listening-hours
+    // stats). Existing databases predate the column, and CREATE TABLE IF NOT
+    // EXISTS won't add it, so ALTER explicitly and ignore "duplicate column".
+    await this.db
+      .execute("ALTER TABLE play_history ADD COLUMN seconds INTEGER NOT NULL DEFAULT 0")
+      .catch(() => { /* column already exists */ });
+
     this.initialized = true;
   }
 
@@ -389,6 +396,50 @@ export class DatabaseManager {
     const map = new Map<string, number>();
     for (const row of rows) {
       map.set(row.date, row.count);
+    }
+    return map;
+  }
+
+  /**
+   * Adds `secs` of real listening time to today (or `dateStr`).
+   *
+   * Only whole seconds are stored; the caller batches fractional progress ticks
+   * and passes the accumulated integer, so repeated small updates don't lose
+   * time to rounding.
+   */
+  async addListeningSeconds(secs: number, dateStr?: string): Promise<void> {
+    const whole = Math.floor(secs);
+    if (whole <= 0) return;
+    await this.ensureDb();
+    const date = dateStr ?? formatLocalDate(new Date());
+    await this.db!.execute(
+      `INSERT INTO play_history (date, count, seconds) VALUES ($1, 0, $2)
+       ON CONFLICT(date) DO UPDATE SET seconds = seconds + $2`,
+      [date, whole]
+    );
+  }
+
+  /**
+   * Daily play counts and listened seconds over the last `daysBack` days.
+   * Returns a Map of "YYYY-MM-DD" → { count, seconds }.
+   */
+  async getDailyActivity(
+    daysBack: number = 365
+  ): Promise<Map<string, { count: number; seconds: number }>> {
+    await this.ensureDb();
+    const since = new Date();
+    since.setDate(since.getDate() - daysBack);
+    const sinceStr = formatLocalDate(since);
+    const rows: any[] = await this.db!.select(
+      "SELECT date, count, seconds FROM play_history WHERE date >= $1 ORDER BY date",
+      [sinceStr]
+    );
+    const map = new Map<string, { count: number; seconds: number }>();
+    for (const row of rows) {
+      map.set(row.date, {
+        count: Number(row.count) || 0,
+        seconds: Number(row.seconds) || 0,
+      });
     }
     return map;
   }

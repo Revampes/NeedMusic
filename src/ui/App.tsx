@@ -122,6 +122,38 @@ const App: React.FC = () => {
   const keydownCleanupRef = useRef<(() => void) | null>(null);
   const hotkeyUnlistenRef = useRef<(() => void) | null>(null);
   const dragCleanupRef = useRef<(() => void) | null>(null);
+  // Listening-time accounting for the activity stats: `onProgressChange` ticks
+  // ~4x/second, so we accumulate real seconds here and bank them in batches.
+  const listenRef = useRef({ lastPos: 0, pending: 0, playing: false });
+
+  /**
+   * Persist the seconds listened since the last flush. Only whole seconds are
+   * written (the fractional remainder stays in `pending`), so repeated calls
+   * never lose time to rounding.
+   */
+  const flushListening = useCallback(() => {
+    const L = listenRef.current;
+    const whole = Math.floor(L.pending);
+    if (whole < 1) return;
+    L.pending -= whole;
+    DatabaseManager.getInstance()
+      .addListeningSeconds(whole)
+      .then(() => window.dispatchEvent(new CustomEvent("listeningActivity")))
+      .catch(() => { /* stats are best-effort */ });
+  }, []);
+
+  // Bank whatever is still pending when the window closes or is hidden —
+  // otherwise the last <15s before quitting would be lost.
+  useEffect(() => {
+    const onHide = () => flushListening();
+    window.addEventListener("pagehide", onHide);
+    window.addEventListener("beforeunload", onHide);
+    return () => {
+      window.removeEventListener("pagehide", onHide);
+      window.removeEventListener("beforeunload", onHide);
+      flushListening();
+    };
+  }, [flushListening]);
 
   useEffect(() => {
     let timedOut = false;
@@ -139,6 +171,11 @@ const App: React.FC = () => {
 
       // Pre-install ffmpeg in the background (MP3 conversion dependency).
       invoke("ensure_ffmpeg_installed").catch(() => {});
+
+      // Keep yt-dlp installed AND current in the background. A stale yt-dlp is
+      // what breaks YouTube downloads ("Requested format is not available"), so
+      // this runs on every launch and never asks the user to update it.
+      invoke("ensure_ytdlp_ready").catch(() => {});
 
       // The LAN server is no longer started automatically. Start it manually
       // from Settings → LAN Sync whenever needed (avoids opening a port on
@@ -203,8 +240,23 @@ const App: React.FC = () => {
 
       setTracks(LibraryManager.getInstance().getAllTracks());
       engine.subscribe({
-        onStateChange: (s) => setPlayer((p) => ({ ...p, playbackState: s })),
+        onStateChange: (s) => {
+          const L = listenRef.current;
+          const nowPlaying = s === PlaybackState.Playing;
+          // Bank the elapsed time as soon as playback stops (pause/stop/end).
+          if (L.playing && !nowPlaying) {
+            L.playing = false;
+            flushListening();
+          } else if (!L.playing && nowPlaying) {
+            L.playing = true;
+          }
+          setPlayer((p) => ({ ...p, playbackState: s }));
+        },
         onTrackChange: (t) => {
+          // The new track restarts at 0 — bank the previous track's time first
+          // and reset the position baseline so the jump isn't counted.
+          flushListening();
+          listenRef.current.lastPos = 0;
           if (t) {
             DatabaseManager.getInstance().recordPlay().catch(() => {});
           }
@@ -214,11 +266,21 @@ const App: React.FC = () => {
             isFavorite: (t as Track)?.isFavorite ?? false,
           }));
         },
-        onProgressChange: (cur, dur) => setPlayer((p) => ({
-          ...p,
-          currentTimeSecs: cur,
-          durationSecs: dur > 0 ? dur : p.durationSecs,
-        })),
+        onProgressChange: (cur, dur) => {
+          const L = listenRef.current;
+          if (L.playing) {
+            const delta = cur - L.lastPos;
+            // Ignore seeks: only count small forward steps between ticks.
+            if (delta > 0 && delta <= 5) L.pending += delta;
+            if (L.pending >= 15) flushListening();
+          }
+          L.lastPos = cur;
+          setPlayer((p) => ({
+            ...p,
+            currentTimeSecs: cur,
+            durationSecs: dur > 0 ? dur : p.durationSecs,
+          }));
+        },
         onVolumeChange: (v) => {
           setPlayer((p) => ({ ...p, volume: v }));
           db.setSetting("volume", String(v));
@@ -432,8 +494,8 @@ const App: React.FC = () => {
         }
       });
       clearTimeout(timeoutId);
-      // Ensure splash screen is visible for at least 2.5 seconds
-      const minSplashMs = 2500;
+      // Ensure splash screen is visible for at least 3 seconds
+      const minSplashMs = 3000;
       const elapsed = performance.now() - splashStartRef.current;
       const remaining = Math.max(0, minSplashMs - elapsed);
       setTimeout(() => {

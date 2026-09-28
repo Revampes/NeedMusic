@@ -30,7 +30,9 @@ body.nm-dragging .queue-panel-item { cursor: copy; }
   justify-content: center;
   height: 100vh;
   width: 100%;
-  background: linear-gradient(135deg, #0d0d0d 0%, #1a1025 30%, #1a1a2e 70%, #0d0d0d 100%);
+  /* Match the main UI background — the old purple/blue tint (#1a1025/#1a1a2e)
+     clashed with the app's grey. */
+  background: var(--bg-deep-purple, #1a1a1a);
   position: fixed;
   top: 0;
   left: 0;
@@ -407,7 +409,10 @@ body.nm-dragging .queue-panel-item { cursor: copy; }
 /* ── Track List ───────────────────────────────────── */
 .track-list{flex:1;overflow-y:auto}
 .track-list-header{display:flex;align-items:center;padding:6px var(--space-2);margin:0 var(--space-1);font-size:var(--text-xs);font-weight:var(--weight-medium);color:var(--text-tertiary);text-transform:uppercase;letter-spacing:.5px;border-bottom:1px solid var(--glass-border);position:sticky;top:0;background:var(--overlay-bg);backdrop-filter:blur(var(--overlay-blur)) saturate(var(--overlay-saturate));z-index:var(--z-sticky)}
-.track-row{display:flex;align-items:center;padding:6px var(--space-2);font-size:var(--text-base);cursor:pointer;transition:background var(--transition-fast);border-radius:var(--radius-sm);margin:0 var(--space-1);position:relative;-webkit-user-select:none;user-select:none}
+.track-row{display:flex;align-items:center;padding:8px var(--space-2);font-size:var(--text-base);cursor:pointer;transition:background var(--transition-fast);border-radius:var(--radius-sm);margin:0 var(--space-1);position:relative;-webkit-user-select:none;user-select:none}
+/* Hairline divider *between* rows (never a trailing line under the last one)
+   so the eye can track a row across the title/artist/album columns. */
+.track-row + .track-row{border-top:1px solid var(--glass-border)}
 .track-row[draggable="true"]{-webkit-user-select:none;user-select:none;-webkit-user-drag:element}
 .track-row::before{content:'';position:absolute;left:0;top:2px;bottom:2px;width:var(--row-active-strip-width);background:transparent;border-radius:0 var(--radius-sm) var(--radius-sm) 0;transition:background var(--transition-fast)}
 .track-row:hover{background:var(--row-hover-bg)}
@@ -535,7 +540,13 @@ body.nm-dragging .queue-panel-item { cursor: copy; }
 .settings-view h3{font-size:var(--text-md);font-weight:var(--weight-semibold);color:var(--text-body);margin-bottom:var(--space-2)}
 .settings-row{display:flex;align-items:center;gap:var(--space-3);margin:var(--space-2) 0;font-size:var(--text-sm);color:var(--text-secondary)}
 .settings-check{display:flex;align-items:center;gap:var(--space-2);margin:var(--space-2) 0;font-size:var(--text-sm);color:var(--text-secondary);cursor:pointer}
-.settings-input{background:rgba(255,255,255,.05);border:1px solid var(--glass-border-strong);color:var(--text-body);font-size:var(--text-sm);padding:6px var(--space-3);border-radius:var(--radius-md);outline:none}
+.settings-input{background:var(--input-bg,#232323);border:1px solid var(--glass-border-strong);color:var(--text-body);font-size:var(--text-sm);padding:6px var(--space-3);border-radius:var(--radius-md);outline:none}
+select.settings-input{cursor:pointer}
+select.settings-input:hover{border-color:var(--text-tertiary)}
+select.settings-input:focus{border-color:var(--accent-primary)}
+/* The native option popup needs its own solid colours — otherwise WebView2
+   draws it on a near-white surface while the text stays light and unreadable. */
+.settings-input option{background:var(--input-bg,#232323);color:var(--text-body)}
 .settings-input.short{width:80px;text-align:center}
 /* Long sliders — flex to fill the settings row instead of a fixed 80px box */
 .settings-input.range{width:auto;flex:1;min-width:160px;max-width:260px;accent-color:var(--accent-primary);padding:0;height:24px}
@@ -1587,6 +1598,94 @@ html.glass-opacity-100 { --glass-bg-opacity: 0.88; }
   margin-bottom: var(--space-3);
   flex-wrap: wrap;
   gap: var(--space-1);
+}
+
+/* ── Month / year listening totals ── */
+.listen-stats {
+  display: flex;
+  gap: var(--space-3);
+  margin-bottom: var(--space-3);
+  flex-wrap: wrap;
+}
+.listen-stat-card {
+  flex: 1 1 140px;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: var(--space-2) var(--space-3);
+  background: rgba(255, 255, 255, 0.04);
+  border: 1px solid var(--glass-border);
+  border-radius: var(--radius-md);
+}
+.listen-stat-label {
+  font-size: var(--text-xs);
+  color: var(--text-tertiary);
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+}
+.listen-stat-value {
+  font-size: var(--text-lg);
+  font-weight: var(--weight-semibold);
+  color: var(--text-body);
+}
+.listen-stat-sub {
+  font-size: var(--text-xs);
+  color: var(--text-secondary);
+}
+
+/* ── Plays per month bars ── */
+.listen-monthly {
+  display: flex;
+  align-items: flex-end;
+  gap: var(--space-3);
+  margin-bottom: var(--space-3);
+}
+.listen-monthly-bars {
+  display: flex;
+  align-items: flex-end;
+  gap: var(--space-2);
+  flex: 1;
+  min-width: 0;
+}
+.listen-monthly-col {
+  flex: 1 1 0;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 4px;
+}
+.listen-monthly-bar-slot {
+  width: 100%;
+  height: 44px;
+  display: flex;
+  align-items: flex-end;
+  background: rgba(255, 255, 255, 0.03);
+  border-radius: var(--radius-sm);
+  overflow: hidden;
+}
+.listen-monthly-bar {
+  width: 100%;
+  min-height: 2px;
+  background: var(--accent-primary);
+  border-radius: var(--radius-sm) var(--radius-sm) 0 0;
+  transition: height var(--transition-normal);
+}
+.listen-monthly-col.current .listen-monthly-bar {
+  background: var(--accent-hover);
+}
+.listen-monthly-label {
+  font-size: 9px;
+  color: var(--text-tertiary);
+}
+.listen-monthly-col.current .listen-monthly-label {
+  color: var(--text-secondary);
+  font-weight: var(--weight-semibold);
+}
+.listen-monthly-caption {
+  font-size: var(--text-xs);
+  color: var(--text-tertiary);
+  flex-shrink: 0;
 }
 
 .heatmap-title {

@@ -10,10 +10,16 @@ interface HeatmapProps {
 interface DayCell {
   date: string;   // "YYYY-MM-DD"
   count: number;  // play count
+  seconds: number; // listened seconds
   dayOfWeek: number; // 0=Sun, 1=Mon, ..., 6=Sat
   weekIndex: number;
   isToday: boolean;
   isFuture: boolean;
+}
+
+interface DayActivity {
+  count: number;
+  seconds: number;
 }
 
 const DAY_LABELS = ["", "Mon", "", "Wed", "", "Fri", ""];
@@ -28,6 +34,17 @@ function formatLocalDate(d: Date): string {
 }
 
 /**
+ * Formats listened seconds as a human duration ("3h 12m", "12m", "0m").
+ */
+function formatListeningTime(totalSecs: number): string {
+  const secs = Math.max(0, Math.round(totalSecs));
+  const h = Math.floor(secs / 3600);
+  const m = Math.floor((secs % 3600) / 60);
+  if (h > 0) return `${h}h ${m}m`;
+  return `${m}m`;
+}
+
+/**
  * Returns an intensity class (0-4) based on play count.
  */
 function getIntensity(count: number): number {
@@ -39,12 +56,13 @@ function getIntensity(count: number): number {
 }
 
 /**
- * GitHub-style contribution heatmap for listening activity.
+ * GitHub-style contribution heatmap for listening activity, plus per-month
+ * plays and month/year listening-hour totals.
  * Columns = calendar weeks (Mon–Sun), always ending with the current week.
  */
 const Heatmap: React.FC<HeatmapProps> = ({ weeks: weeksOverride }) => {
-  const [history, setHistory] = useState<Map<string, number>>(new Map());
-  const [tooltip, setTooltip] = useState<{ date: string; count: number; x: number; y: number } | null>(null);
+  const [activity, setActivity] = useState<Map<string, DayActivity>>(new Map());
+  const [tooltip, setTooltip] = useState<{ date: string; count: number; seconds: number; x: number; y: number } | null>(null);
 
   const todayStr = useMemo(() => formatLocalDate(new Date()), []);
 
@@ -65,13 +83,58 @@ const Heatmap: React.FC<HeatmapProps> = ({ weeks: weeksOverride }) => {
     return Math.ceil((end.getTime() - start.getTime()) / 86_400_000 / 7);
   }, [weeksOverride]);
 
-  useEffect(() => {
-    let cancelled = false;
-    DatabaseManager.getInstance().getPlayHistory(totalWeeks * 7).then((map) => {
-      if (!cancelled) setHistory(map);
-    }).catch(() => {});
-    return () => { cancelled = true; };
+  // Fetch counts + listened seconds in one query (one row per active day).
+  const loadActivity = useCallback(async () => {
+    const map = await DatabaseManager.getInstance().getDailyActivity(totalWeeks * 7);
+    setActivity(map);
   }, [totalWeeks]);
+
+  useEffect(() => {
+    loadActivity().catch(() => { /* no history yet */ });
+  }, [loadActivity]);
+
+  // Re-read when a new day's activity lands (the parent bumps this on progress
+  // flushes), so the totals stay fresh without a page reload.
+  useEffect(() => {
+    const onActivity = () => { loadActivity().catch(() => {}); };
+    window.addEventListener("listeningActivity", onActivity);
+    return () => window.removeEventListener("listeningActivity", onActivity);
+  }, [loadActivity]);
+
+  // ── Totals + per-month breakdown ──
+  const stats = useMemo(() => {
+    const now = new Date();
+    const year = now.getFullYear();
+    const currentMonth = now.getMonth();
+
+    const monthly = MONTH_NAMES.map((name, index) => ({ name, index, plays: 0, seconds: 0 }));
+    let yearPlays = 0;
+    let yearSeconds = 0;
+
+    for (const [date, v] of activity) {
+      const d = new Date(`${date}T00:00:00`);
+      if (d.getFullYear() !== year) continue;
+      yearPlays += v.count;
+      yearSeconds += v.seconds;
+      const bucket = monthly[d.getMonth()];
+      if (bucket) {
+        bucket.plays += v.count;
+        bucket.seconds += v.seconds;
+      }
+    }
+
+    const thisMonth = monthly[currentMonth] ?? { plays: 0, seconds: 0 };
+    return {
+      year,
+      currentMonth,
+      yearPlays,
+      yearSeconds,
+      monthPlays: thisMonth.plays,
+      monthSeconds: thisMonth.seconds,
+      monthly,
+      maxMonthlyPlays: Math.max(1, ...monthly.map((m) => m.plays)),
+    };
+  }, [activity]);
 
   // Build the grid — anchored to Jan 1, covers the full calendar year
   const { cells, monthLabels } = useMemo(() => {
@@ -108,10 +171,12 @@ const Heatmap: React.FC<HeatmapProps> = ({ weeks: weeksOverride }) => {
       const weekIdx = Math.floor(i / 7);
       const isToday = dateStr === todayStr;
       const isFuture = d > today;
+      const day = isFuture ? undefined : activity.get(dateStr);
 
       cellsArr.push({
         date: dateStr,
-        count: isFuture ? 0 : (history.get(dateStr) ?? 0),
+        count: day?.count ?? 0,
+        seconds: day?.seconds ?? 0,
         dayOfWeek: dowCell,
         weekIndex: weekIdx,
         isToday,
@@ -131,7 +196,7 @@ const Heatmap: React.FC<HeatmapProps> = ({ weeks: weeksOverride }) => {
     }
 
     return { cells: cellsArr, monthLabels: monthLbls };
-  }, [history, todayStr, weeksOverride]);
+  }, [activity, todayStr, weeksOverride]);
 
   // Group cells into a 2D grid: rows=days of week (Mon=0..Sun=6), cols=weeks
   const grid = useMemo(() => {
@@ -144,17 +209,12 @@ const Heatmap: React.FC<HeatmapProps> = ({ weeks: weeksOverride }) => {
     return g;
   }, [cells, totalWeeks]);
 
-  const totalPlays = useMemo(() => {
-    let sum = 0;
-    for (const c of history.values()) sum += c;
-    return sum;
-  }, [history]);
-
   const handleMouseEnter = useCallback((e: React.MouseEvent, cell: DayCell) => {
     const rect = (e.target as HTMLElement).getBoundingClientRect();
     setTooltip({
       date: cell.date,
       count: cell.count,
+      seconds: cell.seconds,
       x: rect.left + rect.width / 2,
       y: rect.top - 8,
     });
@@ -169,6 +229,7 @@ const Heatmap: React.FC<HeatmapProps> = ({ weeks: weeksOverride }) => {
           style={{ left: tooltip.x, top: tooltip.y }}
         >
           <strong>{tooltip.count} play{tooltip.count !== 1 ? "s" : ""}</strong> on {tooltip.date}
+          {tooltip.seconds > 0 && <> · {formatListeningTime(tooltip.seconds)}</>}
         </div>,
         document.body
       )
@@ -178,7 +239,45 @@ const Heatmap: React.FC<HeatmapProps> = ({ weeks: weeksOverride }) => {
     <div className="heatmap-wrapper">
       <div className="heatmap-header">
         <h3 className="heatmap-title">Listening Activity</h3>
-        <span className="heatmap-total">{totalPlays} plays in {new Date().getFullYear()}</span>
+        <span className="heatmap-total">
+          {stats.yearPlays} plays · {formatListeningTime(stats.yearSeconds)} in {stats.year}
+        </span>
+      </div>
+
+      {/* ── Month / year totals ── */}
+      <div className="listen-stats">
+        <div className="listen-stat-card">
+          <span className="listen-stat-label">This month</span>
+          <span className="listen-stat-value">{stats.monthPlays} plays</span>
+          <span className="listen-stat-sub">{formatListeningTime(stats.monthSeconds)} listened</span>
+        </div>
+        <div className="listen-stat-card">
+          <span className="listen-stat-label">This year</span>
+          <span className="listen-stat-value">{stats.yearPlays} plays</span>
+          <span className="listen-stat-sub">{formatListeningTime(stats.yearSeconds)} listened</span>
+        </div>
+      </div>
+
+      {/* ── Plays per month (current year) ── */}
+      <div className="listen-monthly">
+        <div className="listen-monthly-bars">
+          {stats.monthly.map((m) => (
+            <div
+              key={m.name}
+              className={`listen-monthly-col${m.index === stats.currentMonth ? " current" : ""}`}
+              title={`${m.name}: ${m.plays} play${m.plays !== 1 ? "s" : ""} · ${formatListeningTime(m.seconds)}`}
+            >
+              <div className="listen-monthly-bar-slot">
+                <div
+                  className="listen-monthly-bar"
+                  style={{ height: `${Math.round((m.plays / stats.maxMonthlyPlays) * 100)}%` }}
+                />
+              </div>
+              <span className="listen-monthly-label">{m.name[0]}</span>
+            </div>
+          ))}
+        </div>
+        <span className="listen-monthly-caption">Plays per month · {stats.year}</span>
       </div>
 
       <div className="heatmap-scroll">

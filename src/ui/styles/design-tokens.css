@@ -4,6 +4,12 @@
    ═══════════════════════════════════════════════════════ */
 
 :root {
+  /* Native controls (select dropdown popups, scrollbars, range tracks,
+     checkboxes) follow the OS light theme unless we say otherwise — in a dark
+     app that paints <select> popups near-white behind light text, so the
+     options become unreadable. */
+  color-scheme: dark;
+
   /* ── Typography: Font Stack ──────────────────────── */
   --font-sans: "Inter", "Segoe UI", "SF Pro Display", -apple-system, BlinkMacSystemFont,
                "Roboto", "Helvetica Neue", Arial, sans-serif;
@@ -67,6 +73,11 @@
   --glass-border:    rgba(255, 255, 255, 0.08);
   --glass-border-strong: rgba(255, 255, 255, 0.12);
   --glass-shadow:    0 8px 32px rgba(0, 0, 0, 0.3);
+
+  /* ── Form Controls ───────────────────────────────── */
+  /* Solid (not translucent) so native <select> dropdown popups inherit an
+     opaque dark surface instead of falling back to the OS white one. */
+  --input-bg:        #232323;
 
   /* ── Text Colors ─────────────────────────────────── */
   --text-primary:    #ffffff;   /* Headers, active tab, now-playing title */
@@ -192,6 +203,8 @@
    LIGHT MODE — theme-light
    ═══════════════════════════════════════════════════════ */
 html.theme-light {
+  color-scheme: light;
+  --input-bg:        #ffffff;
   --bg-deep-purple:  #f8f9fa;
   --bg-mid-purple:   #e9ecef;
   --bg-muted-blue:   #dee2e6;
