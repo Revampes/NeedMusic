@@ -84,8 +84,10 @@ const Heatmap: React.FC<HeatmapProps> = ({ weeks: weeksOverride }) => {
   }, [weeksOverride]);
 
   // Fetch counts + listened seconds in one query (one row per active day).
+  // `getDailyActivityMerged` prefers the cross-device totals written by the
+  // Drive sync merge, falling back to this device's own history when sync is off.
   const loadActivity = useCallback(async () => {
-    const map = await DatabaseManager.getInstance().getDailyActivity(totalWeeks * 7);
+    const map = await DatabaseManager.getInstance().getDailyActivityMerged(totalWeeks * 7);
     setActivity(map);
   }, [totalWeeks]);
 

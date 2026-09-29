@@ -5,6 +5,30 @@
 
 ---
 
+## 0. v3 architecture — IMPLEMENTED (supersedes parts of this document)
+
+The sync now splits the payload into two layers (see `docs/google-drive-sync.md`
+for the contract). Where this document disagrees, the v3 notes below win.
+
+- **Layer 1 — metadata & state (always synced):** track metadata **with or
+  without audio**, favourites, **ratings (1–5)**, **resume positions**,
+  **per-day listening counters**, playlists, and **deletion tombstones**.
+- **Layer 2 — audio (user-controlled):** uploaded only for tracks the user
+  marked *Available offline* (or under the global *Audio in Drive* policy:
+  `all` / `selected` (default) / `none`); downloaded only where requested.
+  Auto-duplicating the whole library onto every device is gone.
+- **Deletions:** `{songKey, deletedAt, deviceId}` tombstones replace the bare
+  `deletedTracks` string list (v2 files are still read). Re-importing a song
+  after its deletion (`addedAt > deletedAt`) resurrects it; tombstones older
+  than **30 days** are garbage-collected.
+- **Merge:** `mergeDeviceFiles` in `src/core/services/cloudsync.ts`, unit-tested
+  in `tests/cloudsync.test.ts` (`npm run test:sync`).
+- **Storage protection:** the web/mobile offline cache is bounded by a
+  configurable limit with LRU eviction; offline-marked tracks are pinned.
+- **Not yet implemented:** desktop on-demand streaming of a Drive-only track via
+  a virtual `drive://` path (a metadata-only track is currently listed but only
+  materialises locally once it is marked offline). See §"Remaining work".
+
 ## 1. Project context
 
 **NeedMusic** — a local-first music player:

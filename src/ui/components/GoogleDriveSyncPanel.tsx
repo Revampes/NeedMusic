@@ -5,6 +5,7 @@
  */
 
 import React from "react";
+import type { AudioMode } from "@core/services/cloudsync";
 
 export interface GoogleSyncPanelProps {
   signedIn: boolean;
@@ -20,6 +21,20 @@ export interface GoogleSyncPanelProps {
   onDownload: () => void;
   onClean: () => void;
   onOpenGuide: () => void;
+  /** Layer-2 policy: what audio this device uploads to Drive. */
+  audioMode?: AudioMode;
+  onAudioModeChange?: (mode: AudioMode) => void;
+  /** Number of songs whose audio this device wants available in Drive. */
+  offlineCount?: number;
+  /** Delete Drive audio for songs nothing references any more. */
+  onReclaimDriveSpace?: () => void;
+  reclaimBusy?: boolean;
+  reclaimResult?: string | null;
+  /** Songs that exist in Drive (with audio) but are NOT in this library yet. */
+  downloadableTracks?: { songKey: string; title: string; artist: string; sizeBytes?: number }[];
+  /** Download one of those into this device's library. */
+  onDownloadTrack?: (songKey: string) => void;
+  downloadingKey?: string | null;
 }
 
 function statusText(status: GoogleSyncPanelProps["status"]): string {
@@ -46,6 +61,15 @@ const GoogleDriveSyncPanel: React.FC<GoogleSyncPanelProps> = ({
   onDownload,
   onClean,
   onOpenGuide,
+  audioMode = "selected",
+  onAudioModeChange,
+  offlineCount = 0,
+  onReclaimDriveSpace,
+  reclaimBusy = false,
+  reclaimResult = null,
+  downloadableTracks = [],
+  onDownloadTrack,
+  downloadingKey = null,
 }) => {
   const busy = status.state === "authorizing" || status.state === "syncing";
   const error = status.state === "error";
@@ -118,6 +142,70 @@ const GoogleDriveSyncPanel: React.FC<GoogleSyncPanelProps> = ({
               style={{ fontSize: 12, color: "var(--color-error)", background: "transparent", border: "1px solid var(--color-error)", opacity: busy ? 0.5 : 1 }}>
               🧹 Clean everything
             </button>
+          </div>
+
+          {/* ── Storage policy (which audio lives in Drive) ── */}
+          <div style={{ marginTop: 14, paddingTop: 12, borderTop: "1px solid var(--glass-border)" }}>
+            <label className="settings-row" style={{ alignItems: "flex-start" }}>
+              <span style={{ minWidth: 132 }}>Audio in Drive</span>
+              <select
+                className="settings-input"
+                style={{ width: 190 }}
+                value={audioMode}
+                onChange={(e) => onAudioModeChange?.(e.target.value as AudioMode)}
+              >
+                <option value="selected">Only marked tracks (recommended)</option>
+                <option value="all">Every track (full cloud backup)</option>
+                <option value="none">Never upload audio</option>
+              </select>
+            </label>
+            <p style={{ fontSize: 10, color: "var(--text-tertiary)", margin: "4px 0 8px", lineHeight: 1.5 }}>
+              Metadata, favourites, ratings, progress and playlists always sync — they are tiny.
+              Audio is uploaded only for tracks marked <strong>Available offline</strong>
+              {offlineCount > 0 ? ` (${offlineCount} marked)` : ""}, so your Drive and your devices
+              are never filled with copies you did not ask for. Tracks already in Drive are kept.
+            </p>
+            {onReclaimDriveSpace && (
+              <div style={{ display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap" }}>
+                <button className="settings-btn" onClick={onReclaimDriveSpace} disabled={reclaimBusy}
+                  style={{ fontSize: 12, background: "var(--btn-hover-bg)", color: "var(--text-secondary)", border: "1px solid var(--glass-border-strong)" }}>
+                  {reclaimBusy ? "Reclaiming…" : "Reclaim Drive space"}
+                </button>
+                <span style={{ fontSize: 10, color: "var(--text-tertiary)" }}>
+                  {reclaimResult ?? "Deletes Drive audio for songs no device keeps offline."}
+                </span>
+              </div>
+            )}
+
+            {/* ── Songs in Drive that are not in this library yet ── */}
+            {downloadableTracks.length > 0 && (
+              <div style={{ marginTop: 12 }}>
+                <div style={{ fontSize: 10, fontWeight: 600, textTransform: "uppercase", letterSpacing: 0.5, color: "var(--text-tertiary)", marginBottom: 6 }}>
+                  In Drive, not on this device ({downloadableTracks.length})
+                </div>
+                <div style={{ maxHeight: 220, overflowY: "auto", display: "flex", flexDirection: "column", gap: 4 }}>
+                  {downloadableTracks.map((t) => (
+                    <div key={t.songKey} style={{ display: "flex", alignItems: "center", gap: 8, padding: "5px 6px", borderRadius: 6, background: "var(--glass-bg)" }}>
+                      <span style={{ flex: 1, minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", fontSize: 12 }}>
+                        {t.title}{t.artist ? <span style={{ color: "var(--text-tertiary)" }}> · {t.artist}</span> : null}
+                      </span>
+                      <button
+                        className="settings-btn"
+                        disabled={downloadingKey === t.songKey}
+                        onClick={() => onDownloadTrack?.(t.songKey)}
+                        title="Download this track onto this device"
+                        style={{ fontSize: 11, padding: "3px 8px", flexShrink: 0 }}
+                      >
+                        {downloadingKey === t.songKey ? "Downloading…" : "⬇ Download"}
+                      </button>
+                    </div>
+                  ))}
+                </div>
+                <p style={{ fontSize: 10, color: "var(--text-tertiary)", marginTop: 6, lineHeight: 1.5 }}>
+                  These songs are synced from another device. Downloading keeps a copy here and on Drive.
+                </p>
+              </div>
+            )}
           </div>
         </>
       ) : (

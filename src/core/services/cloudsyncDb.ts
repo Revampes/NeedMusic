@@ -13,15 +13,39 @@
  */
 
 import { DatabaseManager } from "./DatabaseManager";
+import { Track } from "@core/models/Track";
 import {
   songKeyOf,
+  DEFAULT_AUDIO_MODE,
+  wantsAudioInDrive,
+  unionAudioRequests,
+  resolveAudioId,
+  type AudioIdCache,
   type SyncTrackMeta,
   type DeviceSyncFile,
   type FavRecord,
   type PlaylistRecord,
   type MergedState,
+  type Tombstone,
+  type RatingRecord,
+  type PositionRecord,
+  type PlayStatRecord,
+  type AudioMode,
 } from "./cloudsync";
-import { uploadAudioFile } from "./googleDriveSync";
+import { uploadAudioFile, appDataFileExists } from "./googleDriveSync";
+
+/** How much listening history a device publishes (covers the yearly heatmap). */
+const PLAY_STATS_DAYS = 400;
+
+/* ─── Stale-audio detection ──────────────────────────────────────────────────
+ * A recorded Drive file id can stop existing (e.g. "Clean everything" on
+ * another device wipes the whole appDataFolder). Publishing a dead id makes
+ * every other device fail with Google's "File not found", so each id is
+ * verified ONCE per app run (see `resolveAudioId`): verified ids are trusted,
+ * dead ones are forgotten, and the audio is re-uploaded if some device still
+ * wants it.
+ * ------------------------------------------------------------------------- */
+const AUDIO_ID_CACHE: AudioIdCache = { verified: new Set(), dead: new Set() };
 
 /** Stable per-desktop-device id (WebView2 localStorage; unique vs web build). */
 export function getDesktopDeviceId(): string {
@@ -48,10 +72,19 @@ export function hashString(s: string): string {
 }
 
 /**
- * Build THIS desktop device's own sync file from SQLite state. Uploads audio
- * for local tracks that don't yet have a Drive copy so other devices can play
- * them. `readAudio(path)` reads a local file's bytes (+ mime); it is provided
- * by the Tauri UI layer to keep this core module free of @tauri deps.
+ * Build THIS desktop device's own sync file from SQLite state.
+ *
+ * Layer 1 (metadata, favorites, ratings, positions, play counters, playlists,
+ * tombstones) is always included. Layer 2 (audio bytes) is uploaded ONLY when
+ * the audio policy allows it:
+ *   - `all`      → upload every local track's audio (full cloud backup)
+ *   - `selected` → upload only tracks in `audioRequests` (offline-marked)
+ *   - `none`     → never upload
+ * Audio already on Drive is never re-uploaded, and a metadata write for a track
+ * whose audio lives on Drive keeps its `driveFileId`.
+ *
+ * `readAudio(path)` reads a local file's bytes (+ mime); it is provided by the
+ * Tauri UI layer to keep this core module free of @tauri deps.
  */
 export async function buildDesktopSyncFile(
   token: string,
@@ -59,17 +92,27 @@ export async function buildDesktopSyncFile(
   existingTracks?: SyncTrackMeta[],
   opts?: {
     /** Explicit deletions to keep propagating (persisted here; additive). */
-    pendingDeletes?: Set<string>;
+    tombstones?: Tombstone[];
     /** Favorite change timestamps (songKey → ISO). Only keys the user has
      *  actually toggled on THIS device get records — untouched songs leave the
      *  LWW decision to the device(s) that own their records. */
     favTs?: Record<string, string>;
+    /** Rating change timestamps (songKey → ISO). Same ownership rule. */
+    ratingTs?: Record<string, string>;
+    /** Resume-position timestamps (songKey → ISO). Same ownership rule. */
+    positionTs?: Record<string, string>;
     /** Playlist edit timestamps (id → ISO). Same rule as favTs. */
     playlistTs?: Record<string, string>;
     /** Last-pushed favorite state (songKey → boolean). If the current state
      *  differs, this device bumps the favorite's ts to `now` (so an un-favorite
      *  "wins" LWW against another device's stale favorite). */
     prevFavState?: Record<string, boolean>;
+    /** Song keys that should have audio in Drive (merged union + local picks). */
+    audioRequests?: Set<string>;
+    /** Audio upload policy for THIS device. */
+    audioMode?: AudioMode;
+    /** When the mode was chosen (for its LWW decision). */
+    audioModeTs?: string;
   },
 ): Promise<DeviceSyncFile> {
   const db = DatabaseManager.getInstance();
@@ -77,32 +120,65 @@ export async function buildDesktopSyncFile(
   const now = new Date().toISOString();
 
   // Keep whatever driveFileIds we already know (avoid re-uploading).
-  const driveFileByKey = new Map<string, string>();
+  const existingByKey = new Map<string, SyncTrackMeta>();
   for (const t of existingTracks ?? []) {
-    if (t.driveFileId) driveFileByKey.set(t.songKey, t.driveFileId);
+    if (t?.songKey) existingByKey.set(t.songKey, t);
   }
+
+  const mode = opts?.audioMode ?? DEFAULT_AUDIO_MODE;
+  // Requests come from the host already unioned with every device's merged
+  // requests, so a request made on the PHONE causes this device (which owns the
+  // file) to upload it.
+  const requests = unionAudioRequests(opts?.audioRequests ?? []);
+  const tombstoned = new Set((opts?.tombstones ?? []).map((t) => t.songKey));
 
   const syncTracks: SyncTrackMeta[] = [];
   for (const local of tracks) {
     const songKey = songKeyOf(local);
-    if (opts?.pendingDeletes?.has(songKey)) continue; // user explicitly deleted
+    if (tombstoned.has(songKey)) continue; // user explicitly deleted
     // Online/virtual tracks (bilibili://, youtube://) have no real local file to
-    // upload and no playable offline copy — syncing them would give other
-    // devices an entry they can't play (web 404). Skip them.
-    if (local.isOnlineTrack?.() === true) continue;
-    let driveFileId = driveFileByKey.get(songKey);
-    if (!driveFileId) {
+    // upload and no playable offline copy — syncing their audio is impossible.
+    // Their METADATA still syncs, so favorites/playlists stay consistent.
+    const isOnline = local.isOnlineTrack?.() === true;
+
+    const prior = existingByKey.get(songKey);
+    let driveFileId = prior?.driveFileId;
+    let justUploaded = false;
+    let uploadedSize = 0;
+
+    // ── Verify a remembered id before republishing it ──
+    // A dead id must never be handed to another device (it would fail with
+    // Google's "File not found"), and a dead id is not "already uploaded", so
+    // the normal upload gate below can put a fresh copy back if it is wanted.
+    let hadDeadId = false;
+    if (driveFileId && token) {
+      const resolved = await resolveAudioId(
+        driveFileId,
+        (id) => appDataFileExists(token, id),
+        AUDIO_ID_CACHE,
+      );
+      if (!resolved) {
+        driveFileId = undefined;
+        hadDeadId = true;
+      }
+    }
+    if (hadDeadId) {
+      console.warn("[cloudsync] Drive audio for", songKey, "is gone — will re-upload if wanted");
+    }
+
+    const wantsAudio = wantsAudioInDrive(songKey, mode, requests);
+    if (!isOnline && !driveFileId && wantsAudio && token) {
       try {
         const { bytes, mime } = await readAudio(local.filePath);
         const driveName = `audio__${hashString(songKey)}.bin`;
         driveFileId = await uploadAudioFile(token, driveName, bytes, mime);
+        justUploaded = true;
+        uploadedSize = bytes.length;
       } catch (e) {
         console.warn("[cloudsync] audio upload failed for", local.filePath, String(e));
       }
     }
-    // Only sync tracks that actually have Drive audio (anything without audio
-    // can't be played / downloaded on another device → avoid web 404).
-    if (!driveFileId) continue;
+
     syncTracks.push({
       songKey,
       title: local.title,
@@ -114,7 +190,22 @@ export async function buildDesktopSyncFile(
       year: local.year,
       codec: local.codec,
       isFavorite: !!local.isFavorite,
+      // Genuine "(re)added at" signal — beats a deletion tombstone only when the
+      // song was added AFTER it was deleted.
+      addedAt: local.dateAdded instanceof Date && !Number.isNaN(local.dateAdded.getTime())
+        ? local.dateAdded.toISOString()
+        : undefined,
+      // Layer 2 — present only once some device uploaded the audio.
       driveFileId,
+      audioSizeBytes: driveFileId
+        ? (justUploaded ? uploadedSize : prior?.audioSizeBytes)
+        : undefined,
+      audioUploadedAt: driveFileId
+        ? (justUploaded ? now : prior?.audioUploadedAt)
+        : undefined,
+      audioUploadedBy: driveFileId
+        ? (justUploaded ? getDesktopDeviceId() : prior?.audioUploadedBy)
+        : undefined,
     });
   }
 
@@ -128,13 +219,40 @@ export async function buildDesktopSyncFile(
     const key = t.songKey;
     if (!favTs[key]) continue; // not touched here → leave to its owner device
     // If this device's favorite state CHANGED since its last push, stamp `now`
-    // so the newest user intent (favorite OR un-favorite) wins LWW — otherwise we
-    // would reuse the old ts and a newer other-device record could override it.
+    // so the newest user intent (favorite OR un-favorite) wins LWW.
     const changed = prevFavState[key] !== undefined && prevFavState[key] !== t.isFavorite;
     const ts = changed ? now : favTs[key];
     if (changed) favTs[key] = now; // persist so the next push keeps this ts
     favorites.push({ songKey: key, fav: t.isFavorite, ts });
   }
+
+  // Ratings / resume positions: only songs whose ts this device owns.
+  const ratingTs = opts?.ratingTs ?? {};
+  const ratings: RatingRecord[] = [];
+  const positionTs = opts?.positionTs ?? {};
+  const positions: PositionRecord[] = [];
+  for (const local of tracks) {
+    const key = songKeyOf(local);
+    if (ratingTs[key]) {
+      ratings.push({ songKey: key, stars: Track.clampRating(local.rating), ts: ratingTs[key] });
+    }
+    if (positionTs[key]) {
+      positions.push({
+        songKey: key,
+        secs: Number(local.resumePositionSecs) || 0,
+        ts: positionTs[key],
+      });
+    }
+  }
+
+  // This device's own listening counters (summed across devices on merge).
+  const playStats: PlayStatRecord[] = [];
+  try {
+    const daily = await db.getDailyActivity(PLAY_STATS_DAYS);
+    for (const [date, v] of daily) {
+      playStats.push({ date, count: v.count, seconds: v.seconds });
+    }
+  } catch { /* no history yet */ }
 
   const playlistMeta = await db.getAllPlaylists();
   const playlistTs = opts?.playlistTs ?? {};
@@ -156,9 +274,16 @@ export async function buildDesktopSyncFile(
   return {
     deviceId: getDesktopDeviceId(),
     updatedAt: now,
+    version: 3,
     tracks: syncTracks,
-    deletedTracks: opts?.pendingDeletes ? [...opts.pendingDeletes].sort() : [],
+    tombstones: (opts?.tombstones ?? []).slice().sort((a, b) => a.songKey.localeCompare(b.songKey)),
     favorites,
+    ratings,
+    positions,
+    playStats,
+    audioRequests: [...requests].sort(),
+    audioMode: mode,
+    audioModeTs: opts?.audioModeTs ?? now,
     playlists,
   };
 }
@@ -236,6 +361,26 @@ export async function applyDesktopEnvelope(
     const should = favMap.get(songKeyOf(t)) ?? false;
     if (should !== !!t.isFavorite) {
       await db.setFavorite(t.id, should);
+      changed = true;
+    }
+  }
+
+  // 3b) Ratings: apply the merged LWW value (0 clears the rating).
+  const ratingMap = merged.ratings ?? new Map<string, number>();
+  for (const t of tracks) {
+    const want = Track.clampRating(ratingMap.get(songKeyOf(t)) ?? 0);
+    if (want !== Track.clampRating(t.rating)) {
+      await db.setRating(t.id, want);
+      changed = true;
+    }
+  }
+
+  // 3c) Resume positions: apply the merged LWW value.
+  const posMap = merged.positions ?? new Map<string, number>();
+  for (const t of tracks) {
+    const want = Number(posMap.get(songKeyOf(t)) ?? 0) || 0;
+    if (Math.abs(want - (Number(t.resumePositionSecs) || 0)) > 1) {
+      await db.setResumePosition(t.id, want);
       changed = true;
     }
   }

@@ -100,6 +100,25 @@ export class DatabaseManager {
       .execute("ALTER TABLE play_history ADD COLUMN seconds INTEGER NOT NULL DEFAULT 0")
       .catch(() => { /* column already exists */ });
 
+    // Migrations for cross-device sync state (skip when already present).
+    await this.db
+      .execute("ALTER TABLE tracks ADD COLUMN rating INTEGER NOT NULL DEFAULT 0")
+      .catch(() => { /* column already exists */ });
+    await this.db
+      .execute("ALTER TABLE tracks ADD COLUMN resume_position_secs REAL NOT NULL DEFAULT 0")
+      .catch(() => { /* column already exists */ });
+
+    // Cross-device listening totals. Kept SEPARATE from `play_history` (which
+    // holds THIS device's own counters and is what gets published to Drive) so
+    // merged numbers can never be fed back into the payload and double-counted.
+    await this.db.execute(`
+      CREATE TABLE IF NOT EXISTS play_stats_merged (
+        date    TEXT PRIMARY KEY,
+        count   INTEGER NOT NULL DEFAULT 0,
+        seconds INTEGER NOT NULL DEFAULT 0
+      );
+    `);
+
     this.initialized = true;
   }
 
@@ -242,6 +261,25 @@ export class DatabaseManager {
     );
   }
 
+  // ─── Ratings / Resume Position (cross-device sync state) ────
+
+  /** Set a track's star rating (0–5; 0 clears it). */
+  async setRating(trackId: TrackId, stars: number): Promise<void> {
+    await this.ensureDb();
+    const value = Math.max(0, Math.min(5, Math.round(Number(stars) || 0)));
+    await this.db!.execute("UPDATE tracks SET rating = $1 WHERE id = $2", [value, trackId]);
+  }
+
+  /** Remember where playback stopped, for cross-device resume. */
+  async setResumePosition(trackId: TrackId, secs: number): Promise<void> {
+    await this.ensureDb();
+    const value = Number(secs) > 0 ? Number(secs) : 0;
+    await this.db!.execute(
+      "UPDATE tracks SET resume_position_secs = $1 WHERE id = $2",
+      [value, trackId]
+    );
+  }
+
   // ─── Favorites ────────────────────────────────────────────
 
   async setFavorite(trackId: TrackId, fav: boolean): Promise<void> {
@@ -366,6 +404,50 @@ export class DatabaseManager {
   }
 
   // ─── Play History ───────────────────────────────────────────
+
+  /**
+   * Replace the cross-device listening totals (written after every Drive sync
+   * merge). An empty map clears them, so a signed-out user falls back to their
+   * own `play_history`.
+   */
+  async replaceMergedPlayStats(
+    stats: Map<string, { count: number; seconds: number }>
+  ): Promise<void> {
+    await this.ensureDb();
+    await this.db!.execute("DELETE FROM play_stats_merged");
+    for (const [date, v] of stats) {
+      await this.db!.execute(
+        "INSERT OR REPLACE INTO play_stats_merged (date, count, seconds) VALUES ($1, $2, $3)",
+        [date, Math.round(Number(v.count) || 0), Math.round(Number(v.seconds) || 0)]
+      );
+    }
+  }
+
+  /**
+   * Daily play counts + listened seconds across every synced device.
+   * Falls back to this device's own history when nothing has been merged yet.
+   */
+  async getDailyActivityMerged(
+    daysBack: number = 365
+  ): Promise<Map<string, { count: number; seconds: number }>> {
+    await this.ensureDb();
+    const since = new Date();
+    since.setDate(since.getDate() - daysBack);
+    const sinceStr = formatLocalDate(since);
+    const rows: any[] = await this.db!.select(
+      "SELECT date, count, seconds FROM play_stats_merged WHERE date >= $1 ORDER BY date",
+      [sinceStr]
+    );
+    if (rows.length === 0) return this.getDailyActivity(daysBack);
+    const map = new Map<string, { count: number; seconds: number }>();
+    for (const row of rows) {
+      map.set(row.date, {
+        count: Number(row.count) || 0,
+        seconds: Number(row.seconds) || 0,
+      });
+    }
+    return map;
+  }
 
   /**
    * Records a play event for today's date (increments count).

@@ -12,6 +12,7 @@
     "deploy:web": "npm run build:web && node scripts/deploy-web.mjs",
     "preview": "vite preview",
     "preview:web": "vite preview --config vite.config.web.ts --port 3000",
+    "test:sync": "node --test tests/cloudsync.test.ts",
     "tauri": "tauri"
   },
   "dependencies": {

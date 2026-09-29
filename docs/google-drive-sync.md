@@ -11,8 +11,14 @@ enable the **Google Drive API**, obtain a `CLIENT_ID`, and configure
 > The sync only ever touches a hidden, per-app folder (`appDataFolder`) that is
 > invisible in the user's Drive UI and isolated to your own OAuth client. It
 > uses the **non-sensitive** OAuth scope `https://www.googleapis.com/auth/drive.appdata`.
-> The audio files themselves are **not** synced — only portable metadata
-> (favorites + playlists + track info). No traffic ever goes through NeedMusic.
+> No traffic ever goes through NeedMusic.
+>
+> Sync is split into two layers. **Metadata & state** (tracks, favourites,
+> ratings, resume positions, listening counters, playlists, deletions) is tiny
+> JSON and always syncs in full. **Audio** is heavyweight and **user-controlled**:
+> it is uploaded only for tracks you mark *Available offline* (or when you set
+> "Audio in Drive" to *Every track*), and downloaded only where you asked for
+> it — never duplicated onto every device automatically.
 
 ---
 
@@ -150,21 +156,67 @@ Authorization: Bearer <token>
   `gsi/client` script loaded in `web/index.html`.
 - **Auth**: `google.accounts.oauth2.initTokenClient({ scope: "…/drive.appdata" })`
   returns a short-lived access token used for Drive REST calls.
-- **Read**: list `appDataFolder` for `app_data.json` (`spaces=appDataFolder`,
-  `q=name='app_data.json'`), then download with `alt=media`.
-- **Write**: create/update metadata with a JSON `files.create` / `files.update`
-  and upload content via `/upload/drive/v3/files/{id}?uploadType=media` (no
-  hand-rolled multipart, avoiding Drive's "Invalid JSON payload" boundary pitfall).
-- **Conflict resolution**: timestamp-based — the envelope with the newest
-  `lastUpdated` wins; ties are broken deterministically by `deviceId`.
-- **Cross-device merge**: favorites and playlists are keyed by a normalized
-  **song key** (`artist|title|album|duration`), so desktop and web reconcile the
-  same song even with different internal ids.
+- **Per-device files**: each device owns ONE file `sync-<deviceId>.json` and only
+  ever writes to it, so concurrent devices never race on a shared file. Every
+  cycle merges all devices' files deterministically (`mergeDeviceFiles`).
+- **Two layers**:
+  - *Layer 1 — metadata & state* (always synced): track metadata **with or
+    without audio**, favourites, ratings, resume positions, per-day listening
+    counters, playlists and deletion tombstones. These are kilobytes.
+  - *Layer 2 — audio bytes* (user-controlled): uploaded only for tracks marked
+    offline (or under "Audio in Drive → Every track"), stored as
+    `audio__<hash>.bin` with the file id referenced from the track record.
+- **Merge rules** (deterministic, in `cloudsync.ts`):
+  - tracks — metadata from the newest writer; an audio reference is carried over
+    so a metadata write never drops another device's upload;
+  - favourites / ratings / resume positions — last-writer-wins per song key;
+  - listening counters — **summed** per day (each device's file only holds its
+    own counters, so nothing can double-count);
+  - playlists — last-writer-wins per playlist id;
+  - "Audio in Drive" mode — last-writer-wins globally.
+- **Deletions use tombstones**: a delete records `{songKey, deletedAt}` which
+  propagates to every device. Re-importing the same song afterwards
+  (`addedAt > deletedAt`) resurrects it. Tombstones older than
+  **30 days** are garbage-collected, and their orphaned Drive audio can be
+  reclaimed from *Drive → Reclaim Drive space*.
+- **Storage protection**: on the web/mobile client the offline download cache is
+  bounded by *Settings → Offline storage → Cache limit (MB)*; when it is
+  exceeded the least-recently-used entries are evicted. Tracks marked available
+  offline are **pinned** and never evicted.
+- **How a song gets onto another device** (the on-demand flow):
+  1. the track's metadata syncs everywhere, so it appears in the library even
+     before any audio exists in Drive;
+  2. you mark it *Available offline* (☁ in the desktop track list, the download
+     button on the web) — or simply play it, which downloads it on demand;
+  3. that request is **unioned across devices**, so the device that *owns the
+     file* uploads the audio on its next cycle even when the request came from
+     another device;
+  4. every device that asked for it downloads the audio once the reference
+     appears, and pins its local copy.
+     *Audio in Drive → Only marked tracks* (default) means a library is never
+     uploaded silently; choose *Every track* for a full cloud backup.
+- **Self-healing audio references**: a recorded Drive file id can disappear
+  (running *Clean everything* on ANY device wipes the whole app folder for the
+  account). Each id is therefore verified once per app run before being
+  republished — a dead id is dropped rather than handed to another device (which
+  would fail with Google's `File not found`), a transient check failure keeps
+  trusting it (so a network blip never triggers a library-wide re-upload), and
+  any device that still wants the song re-uploads a fresh copy on the next
+  cycle. A device that hits a missing file drops the dead pointer and re-requests
+  the track instead of showing the raw Google error.
+- **Cross-device merge key**: favorites/ratings/playlists are keyed by a
+  normalized **song key** (`artist|title|album|duration`), so desktop and web
+  reconcile the same song even with different internal ids.
 - The actual code lives in `src/core/services/` (shared: `googleDriveSync.ts`,
-  `cloudsync.ts`, `cloudsyncDb.ts`), `src/ui/useGoogleSync.ts` +
-  `src/ui/useDesktopDriveSync.ts` (auth + orchestration), and
+  `cloudsync.ts` = v3 contract + merge, `cloudsyncDb.ts` = desktop/SQLite side),
+  `src/ui/useGoogleSync.ts` (auth + sync cycle) +
+  `src/ui/useDesktopDriveSync.ts` / `web/useWebDriveSync.ts` (per-build hosts),
+  `web/downloads.ts` (bounded offline cache), and
   `src/ui/components/GoogleDriveSyncPanel.tsx` (desktop UI, with a matching
-  `web/GoogleDriveSyncPanel.tsx` / `web/useWebDriveSync.ts` for the web build).
+  `web/GoogleDriveSyncPanel.tsx` for the web build).
+- **Tests**: `npm run test:sync` runs `tests/cloudsync.test.ts` (Node's built-in
+  runner + native TS type stripping — no extra dependencies) covering tombstone
+  propagation/GC, resurrection, LWW, counter summing and v2 back-compat.
 
 ## Troubleshooting
 

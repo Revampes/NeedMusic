@@ -24,6 +24,10 @@ export class Track implements ITrack {
   public readonly hasArtwork: boolean;
   public readonly dateAdded: Date;
   public isFavorite: boolean;
+  /** Star rating 0–5 (0 = unrated). Synced cross-device via LWW. */
+  public rating: number;
+  /** Last playback position in seconds (for cross-device resume). */
+  public resumePositionSecs: number;
 
   constructor(params: {
     filePath: string;
@@ -39,6 +43,10 @@ export class Track implements ITrack {
     codec?: AudioCodec;
     hasArtwork?: boolean;
     isFavorite?: boolean;
+    rating?: number;
+    resumePositionSecs?: number;
+    /** When the track entered the library. Defaults to now (new imports). */
+    dateAdded?: Date;
   }) {
     this.id = Track.generateId(params.filePath);
     this.filePath = params.filePath;
@@ -53,8 +61,34 @@ export class Track implements ITrack {
     this.year = params.year ?? null;
     this.codec = params.codec ?? Track.detectCodec(params.filePath);
     this.hasArtwork = params.hasArtwork ?? false;
-    this.dateAdded = new Date();
+    this.dateAdded = params.dateAdded ?? new Date();
     this.isFavorite = params.isFavorite ?? false;
+    this.rating = Track.clampRating(params.rating);
+    this.resumePositionSecs = Number(params.resumePositionSecs) > 0 ? Number(params.resumePositionSecs) : 0;
+  }
+
+  /** Clamp a rating into the valid 0–5 integer range. */
+  static clampRating(value: unknown): number {
+    const n = Math.round(Number(value));
+    if (!Number.isFinite(n) || n <= 0) return 0;
+    return Math.min(5, n);
+  }
+
+  /**
+   * Parse a SQLite timestamp into a Date.
+   * `datetime('now')` yields "YYYY-MM-DD HH:MM:SS" in **UTC** with no zone
+   * marker, which `new Date()` would otherwise read as local time — so the
+   * string is normalized to ISO (UTC) first.
+   */
+  static parseDbDate(value: string | null | undefined): Date | undefined {
+    if (!value) return undefined;
+    const s = String(value).trim();
+    if (!s) return undefined;
+    const iso = /^\d{4}-\d{2}-\d{2}[ T]\d{2}:\d{2}:\d{2}$/.test(s)
+      ? `${s.replace(" ", "T")}Z`
+      : s;
+    const d = new Date(iso);
+    return Number.isNaN(d.getTime()) ? undefined : d;
   }
 
   // ─── Factory Methods ───────────────────────────────────────
@@ -75,6 +109,9 @@ export class Track implements ITrack {
     year: number | null;
     has_artwork: boolean;
     is_favorite?: number | boolean | string;
+    rating?: number | string | null;
+    resume_position_secs?: number | string | null;
+    date_added?: string | null;
   }): Track {
     return new Track({
       filePath: raw.file_path,
@@ -90,6 +127,9 @@ export class Track implements ITrack {
       hasArtwork: raw.has_artwork,
       // Normalize SQLite INTEGER (0/1) or boolean representation.
       isFavorite: raw.is_favorite === 1 || raw.is_favorite === "1" || raw.is_favorite === true,
+      rating: Track.clampRating(raw.rating),
+      resumePositionSecs: Number(raw.resume_position_secs) || 0,
+      dateAdded: Track.parseDbDate(raw.date_added),
     });
   }
 

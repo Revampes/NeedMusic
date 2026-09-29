@@ -428,6 +428,15 @@ body.nm-dragging .queue-panel-item { cursor: copy; }
 .col-artist{flex:2;color:var(--text-secondary);font-size:var(--text-sm);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;padding-right:var(--space-3)}
 .col-album{flex:2;color:var(--text-tertiary);font-size:var(--text-sm);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;padding-right:var(--space-3)}
 .col-dur{width:52px;text-align:right;color:var(--text-tertiary);font-family:var(--font-mono);font-size:var(--text-xs);flex-shrink:0}
+/* Star rating (click to set 1-5; click the active star to clear). */
+.col-rate{width:74px;display:flex;align-items:center;gap:1px;flex-shrink:0}
+.rate-star{background:none;border:none;padding:0 1px;font-size:12px;line-height:1;cursor:pointer;color:var(--text-muted);transition:color var(--transition-fast)}
+.rate-star.on{color:var(--accent-primary)}
+.rate-star:hover{color:var(--accent-hover)}
+/* "Keep this song available offline" toggle. */
+.col-offline{width:26px;text-align:center;color:var(--text-muted);font-size:13px;cursor:pointer;flex-shrink:0}
+.col-offline.on{color:var(--color-success)}
+.col-offline:hover{color:var(--text-secondary)}
 .col-add{width:28px;text-align:center;color:var(--text-tertiary);font-size:16px;cursor:pointer;flex-shrink:0}.col-add:hover{color:var(--accent-primary)}
 .col-remove{width:28px;text-align:center;color:var(--text-tertiary);font-size:12px;cursor:pointer;flex-shrink:0;opacity:0;transition:all var(--transition-fast)}
 .track-row:hover .col-remove{opacity:1}.col-remove:hover{color:var(--accent-primary)}

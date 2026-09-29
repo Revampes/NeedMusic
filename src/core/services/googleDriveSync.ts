@@ -295,6 +295,47 @@ export async function downloadAudioFile(token: string, fileId: string): Promise<
   return downloadBinaryContent(token, fileId);
 }
 
+/**
+ * Permanently delete one appDataFolder file (used to reclaim audio for songs
+ * that are no longer requested on any device). A 404 is treated as success —
+ * the file is already gone.
+ */
+export async function deleteDriveFile(token: string, fileId: string): Promise<void> {
+  const res = await fetch(`${DRIVE_API}/files/${encodeURIComponent(fileId)}`, {
+    method: "DELETE",
+    headers: { Authorization: `Bearer ${token}` },
+  });
+  if (res.status === 401) throw new DriveAuthError("Access token expired — please sign in again.");
+  if (!res.ok && res.status !== 404) {
+    let detail = `HTTP ${res.status}`;
+    try { const b = await res.json(); if (b?.error?.message) detail = `${b.error.message} (${detail})`; } catch { /* ignore */ }
+    throw new DriveApiError(detail, res.status);
+  }
+}
+
+/**
+ * Does this appDataFolder file still exist?
+ *
+ * Metadata-only lookup (`fields=id`), so it is cheap. Used to detect ids that
+ * have gone stale — e.g. after "Clean everything" wiped the app folder on
+ * another device — so a device stops publishing (and other devices stop trying
+ * to download) a file that is no longer there.
+ */
+export async function appDataFileExists(token: string, fileId: string): Promise<boolean> {
+  const res = await fetch(
+    `${DRIVE_API}/files/${encodeURIComponent(fileId)}?fields=id&supportsAllDrives=true`,
+    { headers: { Authorization: `Bearer ${token}` } },
+  );
+  if (res.status === 401) throw new DriveAuthError("Access token expired — please sign in again.");
+  if (res.status === 404) return false;
+  if (!res.ok) {
+    let detail = `HTTP ${res.status}`;
+    try { const b = await res.json(); if (b?.error?.message) detail = `${b.error.message} (${detail})`; } catch { /* ignore */ }
+    throw new DriveApiError(detail, res.status);
+  }
+  return true;
+}
+
 /* ─── Public API ────────────────────────────────────────────────────────── */
 
 /**

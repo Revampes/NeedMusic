@@ -16,18 +16,31 @@ import {
 import { initWebPlayer, webTrackStore, toPlayableTrack, TrackData } from "./bootstrap";
 import {
   saveDownloadedAudio, getDownloadedAudio, removeDownloadedAudio, getAllDownloadedAudio, clearAllDownloadedAudio,
+  evictToLimit, getCacheStats,
 } from "./downloads";
 import { buildZip } from "./zip";
 import { downloadAudioFile } from "./GoogleDriveSync";
 import { useWebDriveSync } from "./useWebDriveSync";
 import GoogleDriveSyncPanel from "./GoogleDriveSyncPanel";
 import { loadPlaylists, savePlaylists, type WebPlaylist } from "./playlistsStore";
-import { songKeyOf, type SyncTrackMeta } from "@core/services/cloudsync";
+import { songKeyOf, wantsAudioInDrive, reconcileAudioUrl, type SyncTrackMeta } from "@core/services/cloudsync";
 import "../src/ui/styles/design-tokens.css";
 import "../src/ui/styles/global.css";
 
 const SPEED_OPTIONS = [0.5, 0.75, 1.0, 1.25, 1.5, 2.0];
 const FILTERS = ["All", "Title", "Artist", "Album", "Genre"];
+
+/** localStorage key + default for the offline download cache budget (MB). */
+const MAX_CACHE_MB_KEY = "needmusic:maxCacheMb";
+const DEFAULT_MAX_CACHE_MB = 500;
+function readMaxCacheMb(): number {
+  try {
+    const v = Number(localStorage.getItem(MAX_CACHE_MB_KEY));
+    return Number.isFinite(v) && v > 0 ? v : DEFAULT_MAX_CACHE_MB;
+  } catch {
+    return DEFAULT_MAX_CACHE_MB;
+  }
+}
 const SORT_OPTIONS = [
   { value: "default", label: "Default order" },
   { value: "title-az", label: "Title A–Z" },
@@ -277,13 +290,18 @@ const WebApp: React.FC = () => {
   // Track id → local blob URL of a downloaded copy (plays without LAN).
   const downloadedRef = useRef(new Map<string, string>());
   // Track id → detected real format (from the file's magic bytes).
-  const downloadedFormatRef = useRef(new Map<string, string>());
-  // Live Drive access token, kept in a ref so the (memoized) play handler sees
+  const downloadedFormatRef = useRef(new Map<string, string>());  // Live Drive access token, kept in a ref so the (memoized) play handler sees
   // the current value after login instead of a stale closure from first render.
   const driveTokenRef = useRef("");
   // Live Drive run-sync, kept in a ref so delete handlers can force an immediate
   // propagation (a deletion must reach Drive before the periodic pull re-adds it).
   const driveRunSyncRef = useRef<(() => void) | null>(null);
+  // Live "keep offline" handle, so the download handlers (declared above the
+  // Drive hook) can ask the device that owns a file to upload it.
+  const setOfflineRef = useRef<((songKey: string, offline: boolean) => void) | null>(null);
+  // Live persist handle — the recovery handler above is declared before
+  // `persistTracks`, so it goes through a ref instead.
+  const persistTracksRef = useRef<((ts: TrackData[]) => void) | null>(null);
   // Track id currently being downloaded (for UI feedback).
   const [downloadingId, setDownloadingId] = useState<string | null>(null);
   // Bumped whenever a downloaded copy is added/removed so status indicators
@@ -341,6 +359,34 @@ const WebApp: React.FC = () => {
   const downloadTrack = useCallback(async (td: TrackData, force = false): Promise<string> => {
     const cached = downloadedRef.current.get(td.id);
     if (cached && !force) return cached;
+
+    // Drive-backed track: its audio lives in the user's own Drive appDataFolder.
+    // Fetch it directly (there is no LAN/cloud URL to stream from) and PIN the
+    // copy, because the user explicitly asked to keep it on this device.
+    if (td.audioUrl.startsWith("drive://")) {
+      const fileId = td.audioUrl.slice("drive://".length);
+      if (!fileId || !driveTokenRef.current) {
+        throw new Error("its audio is in your Google Drive but you are not signed in — sign in under Drive");
+      }
+      setDownloadingId(td.id);
+      try {
+        const buf = await downloadAudioFile(driveTokenRef.current, fileId);
+        const blob = new Blob([buf], { type: "audio/mpeg" });
+        try {
+          const head = new Uint8Array(await blob.slice(0, 64).arrayBuffer());
+          downloadedFormatRef.current.set(td.id, sniffFormat(head));
+        } catch { /* ignore */ }
+        const url = URL.createObjectURL(blob);
+        downloadedRef.current.set(td.id, url);
+        setDlVersion((v) => v + 1);
+        try { await saveDownloadedAudio(td.id, blob, { pinned: true }); }
+        catch { /* storage full — playable this session only */ }
+        return url;
+      } finally {
+        setDownloadingId(null);
+      }
+    }
+
     // Always fetch from the CURRENT server address/token (a saved URL may
     // hold a dead token after the desktop restarted). Cloud URLs pass through
     // unchanged (see playableAudioUrl).
@@ -373,11 +419,58 @@ const WebApp: React.FC = () => {
     }
   }, [lanUrl, cloudUrl]);
 
+  /** Ask the device that owns a track's file to upload it to Drive. */
+  const requestTrackOffline = useCallback((td: TrackData) => {
+    try { setOfflineRef.current?.(songKeyOf(td), true); } catch { /* ignore */ }
+  }, []);
+
+  /**
+   * The Drive file a track pointed at no longer exists (typically because
+   * "Clean everything" ran on another device and wiped the app folder). Forget
+   * the dead reference locally, ask the owning device to upload a fresh copy,
+   * and explain what happens next instead of surfacing Google's raw error.
+   */
+  const recoverFromMissingDriveAudio = useCallback((td: TrackData): string => {
+    try {
+      const t = webTrackStore.getById(td.id);
+      if (t && t.audioUrl?.startsWith("drive://")) {
+        t.audioUrl = ""; // drop the dead id so a fresh one can be adopted
+        persistTracksRef.current?.(webTrackStore.getAll());
+        setDlVersion((v) => v + 1);
+      }
+    } catch { /* ignore */ }
+    requestTrackOffline(td);
+    return `“${td.title}” is no longer in your Google Drive (Drive was cleared on another device). ` +
+      `Requested it again — it will download once the device that has the file syncs.`;
+  }, [requestTrackOffline]);
+
+  /** True when an error means the Drive file is gone. */
+  const isDriveMissing = (e: any): boolean =>
+    Number(e?.status) === 404 || /not found/i.test(String(e?.message ?? e));
+
   /** Download a single track, surfacing failures instead of swallowing them. */
   const handleDownloadTrack = useCallback(async (td: TrackData) => {
+    // No audio anywhere yet (metadata-only sync): the only way this track can
+    // become downloadable is for the device that HAS the file to upload it, so
+    // treat the request as an offline mark and explain what happens next.
+    if (!td.audioUrl) {
+      requestTrackOffline(td);
+      setPlayError(
+        `“${td.title}” is synced as a reference only — its audio isn't in Drive yet. ` +
+        `Requested it from your other devices; it will download here once the device that has the file syncs.`,
+      );
+      return;
+    }
     try {
       await downloadTrack(td);
+      // A Drive-backed download is an explicit "keep this offline" request: mark
+      // it so the cloud keeps the audio and cache eviction never drops it.
+      if (td.audioUrl.startsWith("drive://")) requestTrackOffline(td);
     } catch (e: any) {
+      if (td.audioUrl.startsWith("drive://") && isDriveMissing(e)) {
+        setPlayError(recoverFromMissingDriveAudio(td));
+        return;
+      }
       setPlayError(
         `Couldn't save "${td.title}" on this device: ${(e && e.message) || e}. ` +
           (lanUrl
@@ -594,6 +687,7 @@ const WebApp: React.FC = () => {
       localStorage.setItem("needmusic:tracks", JSON.stringify(ts));
     } catch { /* quota exceeded */ }
   }, []);
+  persistTracksRef.current = persistTracks;
 
   // ── Sync the desktop library over LAN and merge into local tracks ──
   const syncLanLibrary = useCallback(async (url: string) => {
@@ -811,6 +905,12 @@ const WebApp: React.FC = () => {
         const isMp4 = isMp4FamilyTrack(td, downloadedFormatRef.current);
         await engine.play({ ...toPlayableTrack(td), filePath: withMp4Hint(blobUrl, isMp4) } as any);
       } catch (e: any) {
+        // The remembered Drive file is gone (e.g. Drive was cleared on another
+        // device). Recover instead of showing Google's "File not found".
+        if (isDriveMissing(e)) {
+          setPlayError(recoverFromMissingDriveAudio(td));
+          return;
+        }
         setPlayError(`Couldn't play "${td.title}" from Drive: ${(e && e.message) || e}`);
       }
       return;
@@ -998,51 +1098,78 @@ const WebApp: React.FC = () => {
   // resolver. Newly seen drive tracks are also auto-downloaded (persisted to
   // IndexedDB) so they're playable without an extra tap. Tracks that were
   // removed on another device (no longer in the cloud list) are removed here.
-  const onApplyDriveTracks = useCallback((driveTracks: SyncTrackMeta[]) => {
+  const onApplyDriveTracks = useCallback((driveTracks: SyncTrackMeta[], merged?: { audioMode: string; audioRequests: Set<string>; ratings: Map<string, number>; positions: Map<string, number> }) => {
     const token = driveTokenRef.current;
     let added = 0;
     // De-dup by song key: if we already have this song locally — whether it's a
     // Drive-synced `drive-*` entry or a track the USER imported/uploaded from
     // this device (non-`drive-` id, same song key) — don't inject a second copy.
-    const localSongs = new Set(webTrackStore.getAll().map((t) => songKeyOf(t)));
+    const localSongs = new Map<string, TrackData>();
+    for (const t of webTrackStore.getAll()) localSongs.set(songKeyOf(t), t);
 
     for (const m of driveTracks) {
-      if (!m.driveFileId) continue;
-      if (localSongs.has(m.songKey)) continue; // already present → avoid duplicates
-      const id = `drive-${m.songKey}`;
-      if (webTrackStore.getById(id)) continue; // defensive: same id already present
-      {
-        const t: TrackData = {
-          id,
-          title: m.title,
-          artist: m.artist,
-          album: m.album,
-          albumArtist: m.albumArtist || m.artist,
-          durationSecs: m.durationSecs || 0,
-          trackNumber: null,
-          discNumber: null,
-          genre: m.genre || "",
-          year: m.year ?? null,
-          codec: m.codec || "mp3",
-          hasArtwork: false,
-          dateAdded: new Date(),
-          isFavorite: m.isFavorite,
-          audioUrl: `drive://${m.driveFileId}`,
-          sourceName: `${m.title} (Drive)`,
-        };
-        webTrackStore.addTrack(t);
-        localSongs.add(m.songKey);
-        added++;
+      // ── Layer 1: make sure a library ROW exists (metadata always syncs) ──
+      let entry = localSongs.get(m.songKey);
+      const preferredId = `drive-${m.songKey}`;
+      if (!entry) {
+        if (webTrackStore.getById(preferredId)) {
+          entry = webTrackStore.getById(preferredId);
+        } else {
+          const t: TrackData = {
+            id: preferredId,
+            title: m.title,
+            artist: m.artist,
+            album: m.album,
+            albumArtist: m.albumArtist || m.artist,
+            durationSecs: m.durationSecs || 0,
+            trackNumber: null,
+            discNumber: null,
+            genre: m.genre || "",
+            year: m.year ?? null,
+            codec: m.codec || "mp3",
+            hasArtwork: false,
+            dateAdded: new Date(),
+            isFavorite: m.isFavorite,
+            // Layer 1 always syncs the REFERENCE; the audio may not be in Drive
+            // yet, in which case the row becomes playable once a device uploads it.
+            audioUrl: m.driveFileId ? `drive://${m.driveFileId}` : "",
+            rating: merged?.ratings.get(m.songKey) ?? 0,
+            resumePositionSecs: merged?.positions.get(m.songKey) ?? 0,
+            sourceName: `${m.title} (Drive)`,
+          };
+          webTrackStore.addTrack(t);
+          localSongs.set(m.songKey, t);
+          entry = t;
+          added++;
+        }
       }
-      // Auto-download this Drive audio (if not already cached) so it survives
-      // restart and plays instantly.
-      if (token && !downloadedRef.current.has(id)) {
+      if (!entry) continue;
+      // ── Layer 2: keep the row's audio pointer in sync with the cloud ──
+      // Critically this also handles a CHANGED id (the owner re-uploaded after
+      // the old file was deleted) and a REMOVED one — previously a row that
+      // already held a `drive://` pointer kept the stale id forever, so playback
+      // failed with Google's "File not found" even after the audio had been
+      // re-uploaded under a new id.
+      const nextUrl = reconcileAudioUrl(entry.audioUrl, m.driveFileId);
+      if (nextUrl !== null) {
+        entry.audioUrl = nextUrl;
+        added++; // persists the updated library below
+      }
+
+      // ── Layer 2 download: only for tracks this device wants offline ──
+      const wanted = !!m.driveFileId && wantsAudioInDrive(
+        m.songKey, (merged?.audioMode as any) ?? "selected", merged?.audioRequests ?? [],
+      );
+      const alreadyLocal = downloadedRef.current.has(entry.id);
+      if (wanted && token && !alreadyLocal) {
         (async () => {
           try {
             const buf = await downloadAudioFile(token, m.driveFileId!);
             const blob = new Blob([buf], { type: "audio/mpeg" });
-            await saveDownloadedAudio(id, blob);
-            downloadedRef.current.set(id, URL.createObjectURL(blob));
+            // Pinned: the user explicitly wants this one, so cache eviction
+            // must never reclaim it.
+            await saveDownloadedAudio(entry.id, blob, { pinned: true });
+            downloadedRef.current.set(entry.id, URL.createObjectURL(blob));
             setDlVersion((v) => v + 1);
           } catch { /* not downloaded yet — will download on first play */ }
         })();
@@ -1104,12 +1231,36 @@ const WebApp: React.FC = () => {
     onDeletedTracks: onDeletedTracksFromDrive,
   });
   driveRunSyncRef.current = driveSync.runSync;
+  setOfflineRef.current = driveSync.setTrackOffline;
 
   // Keep the live Drive token in a ref so the memoized play handler always sees
   // the current value after login (avoids stale-closure "sign in again" errors).
   useEffect(() => {
     driveTokenRef.current = driveSync.token;
   }, [driveSync.token]);
+
+  // ── Offline cache budget (LRU) ─────────────────────────────────────────────
+  // Keeps device storage from filling up: when the downloaded-audio store grows
+  // past `maxCacheMb`, the least-recently-used UNPINNED entries are evicted.
+  // Tracks the user explicitly marked available offline are pinned and never
+  // evicted. Runs after every download and on startup.
+  useEffect(() => {
+    if (!ready) return;
+    const limitBytes = readMaxCacheMb() * 1024 * 1024;
+    let cancelled = false;
+    (async () => {
+      const removed = await evictToLimit(limitBytes).catch(() => [] as string[]);
+      if (cancelled || !removed.length) return;
+      for (const id of removed) {
+        const blobUrl = downloadedRef.current.get(id);
+        if (blobUrl) { try { URL.revokeObjectURL(blobUrl); } catch { /* ignore */ } }
+        downloadedRef.current.delete(id);
+        downloadedFormatRef.current.delete(id);
+      }
+      setDlVersion((v) => v + 1); // re-render so "saved on this device" badges update
+    })();
+    return () => { cancelled = true; };
+  }, [ready, dlVersion]);
 
   // ── Splash / Error ────────────────────────────────
   if (error) return (
@@ -1295,7 +1446,12 @@ const WebApp: React.FC = () => {
                     }
                   }}
                   onOpenGuide={() => { try { window.open("https://github.com/Revampes/NeedMusic/blob/main/docs/google-drive-sync.md", "_blank"); } catch { /* ignore */ } }}
+                  audioMode={driveSync.audioMode}
+                  onAudioModeChange={driveSync.setAudioMode}
+                  offlineCount={driveSync.mergedInfo.audioRequests.size}
                 />
+                {/* ── Offline cache budget (keeps this device's storage in check) ── */}
+                <OfflineCacheSettings onChanged={() => setDlVersion((v) => v + 1)} />
               </div>
             ) : activeTab === "Settings" ? (
                 <WebSettingsView
@@ -2294,6 +2450,75 @@ const WebAddToPlaylistModal: React.FC<{
         </div>
       </div>
     </div>
+  );
+};
+
+// ─── Offline cache budget (web / mobile) ─────────────
+const OfflineCacheSettings: React.FC<{ onChanged: () => void }> = ({ onChanged }) => {
+  const [mb, setMb] = useState<number>(() => readMaxCacheMb());
+  const [stats, setStats] = useState<{ count: number; totalBytes: number; pinnedBytes: number } | null>(null);
+  const [busy, setBusy] = useState(false);
+
+  const refresh = useCallback(() => {
+    void getCacheStats().then(setStats).catch(() => setStats(null));
+  }, []);
+  useEffect(() => { refresh(); }, [refresh]);
+
+  const save = (value: number) => {
+    const v = Number(value);
+    if (!Number.isFinite(v) || v <= 0) return;
+    setMb(v);
+    try { localStorage.setItem(MAX_CACHE_MB_KEY, String(v)); } catch { /* ignore */ }
+    void evictToLimit(v * 1024 * 1024).then(() => { refresh(); onChanged(); }).catch(() => {});
+  };
+
+  const fmtBytes = (b: number) => {
+    if (b >= 1024 * 1024 * 1024) return `${(b / 1024 / 1024 / 1024).toFixed(1)} GB`;
+    if (b >= 1024 * 1024) return `${(b / 1024 / 1024).toFixed(1)} MB`;
+    return `${Math.round(b / 1024)} KB`;
+  };
+
+  return (
+    <section style={{ marginTop: 18 }}>
+      <h3 style={{ marginBottom: 8 }}>📦 Offline storage</h3>
+      <p style={{ fontSize: 11, color: "var(--text-secondary)", marginBottom: 10, lineHeight: 1.5 }}>
+        Downloaded audio is cached on this device for offline playback. When the cache grows past
+        the limit, the least-recently-used tracks are removed — tracks you marked
+        <strong> Available offline</strong> are never evicted.
+      </p>
+      <div style={{ display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap" }}>
+        <label style={{ fontSize: 12, color: "var(--text-secondary)" }}>Cache limit (MB)</label>
+        <input
+          className="settings-input"
+          type="number"
+          min={50}
+          step={50}
+          value={mb}
+          onChange={(e) => save(Number(e.target.value))}
+          style={{ width: 100 }}
+        />
+        <button
+          className="settings-btn"
+          disabled={busy}
+          style={{ fontSize: 12, background: "var(--btn-hover-bg)", color: "var(--text-secondary)", border: "1px solid var(--glass-border-strong)" }}
+          onClick={async () => {
+            setBusy(true);
+            try { await clearAllDownloadedAudio(); } catch { /* ignore */ }
+            setBusy(false);
+            refresh();
+            onChanged();
+          }}
+        >
+          {busy ? "Clearing…" : "Clear download cache"}
+        </button>
+      </div>
+      {stats && (
+        <p style={{ fontSize: 11, color: "var(--text-tertiary)", marginTop: 8 }}>
+          {stats.count} track{stats.count === 1 ? "" : "s"} cached · {fmtBytes(stats.totalBytes)} used
+          {stats.pinnedBytes > 0 ? ` (${fmtBytes(stats.pinnedBytes)} kept offline)` : ""}
+        </p>
+      )}
+    </section>
   );
 };
 

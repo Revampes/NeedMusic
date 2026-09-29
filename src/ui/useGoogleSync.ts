@@ -387,5 +387,39 @@ function signatureOf(file: DeviceSyncFile): string {
   const tr = file.tracks
     .map((x) => `${x.songKey}:${x.driveFileId ?? ""}`)
     .sort();
-  return JSON.stringify({ tr, del: file.deletedTracks, fav, pl });
+  const tomb = [...(file.tombstones ?? [])]
+    .map((t) => `${t.songKey}:${t.deletedAt}`)
+    .sort();
+  const ratings = [...(file.ratings ?? [])]
+    .map((r) => `${r.songKey}:${r.stars}:${r.ts}`)
+    .sort();
+  // Positions are rounded to whole seconds so a fractional seek tick can't churn
+  // the signature on its own.
+  const positions = [...(file.positions ?? [])]
+    .map((p) => `${p.songKey}:${Math.round(p.secs)}:${p.ts}`)
+    .sort();
+  const req = [...(file.audioRequests ?? [])].sort();
+
+  // Listening counters change continuously while playing, so summarise them at
+  // minute granularity: at most one extra push per minute, not one per cycle.
+  let statCount = 0;
+  let statSeconds = 0;
+  for (const s of file.playStats ?? []) {
+    statCount += Number(s.count) || 0;
+    statSeconds += Number(s.seconds) || 0;
+  }
+
+  return JSON.stringify({
+    tr,
+    del: file.deletedTracks ?? [],
+    tomb,
+    fav,
+    pl,
+    ratings,
+    positions,
+    req,
+    mode: file.audioMode ?? "",
+    modeTs: file.audioModeTs ?? "",
+    stats: `${statCount}:${Math.floor(statSeconds / 60)}`,
+  });
 }

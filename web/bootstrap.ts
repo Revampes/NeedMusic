@@ -62,6 +62,10 @@ export interface TrackData {
   hasArtwork: boolean;
   dateAdded: Date;
   isFavorite: boolean;
+  /** Star rating 0–5 (0 = unrated). Synced cross-device via LWW. */
+  rating?: number;
+  /** Last playback position in seconds (for cross-device resume). */
+  resumePositionSecs?: number;
   /** The audio source: a blob URL, data URL, or remote URL. */
   audioUrl: string;
   /** Optional artwork data URL. */

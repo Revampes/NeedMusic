@@ -592,10 +592,6 @@ const SettingsView: React.FC<Props> = ({ onTracksLoaded }) => {
             </button>
             <button className="settings-btn" style={{ fontSize: 12 }} onClick={loadCacheInfo}>Refresh</button>
           </div>
-          <label className="settings-row" style={{ marginTop: 12 }}><span>Max Cache (MB)</span>
-            <input className="settings-input short" type="number" min="50" max="10000" step="50" value={settings.maxCacheMb} onChange={e => save("maxCacheMb", e.target.value)} />
-            <span style={{ fontSize: 11, color: "var(--text-tertiary)" }}>Auto-clear when exceeded</span>
-          </label>
         </div>
       </section>
 

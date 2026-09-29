@@ -9,6 +9,7 @@
 
 import React from "react";
 import type { GoogleSyncStatus } from "./useGoogleSync";
+import type { AudioMode } from "@core/services/cloudsync";
 
 export interface GoogleSyncPanelProps {
   signedIn: boolean;
@@ -21,6 +22,11 @@ export interface GoogleSyncPanelProps {
   onDownload: () => void;
   onClean: () => void;
   onOpenGuide: () => void;
+  /** Layer-2 policy: what audio this device uploads to Drive. */
+  audioMode?: AudioMode;
+  onAudioModeChange?: (mode: AudioMode) => void;
+  /** Number of songs wanted available in Drive. */
+  offlineCount?: number;
 }
 
 function statusText(status: GoogleSyncStatus): string {
@@ -49,6 +55,9 @@ const GoogleDriveSyncPanel: React.FC<GoogleSyncPanelProps> = ({
   onDownload,
   onClean,
   onOpenGuide,
+  audioMode = "selected",
+  onAudioModeChange,
+  offlineCount = 0,
 }) => {
   const busy = isBusy(status);
   const error = status.state === "error";
@@ -121,6 +130,28 @@ const GoogleDriveSyncPanel: React.FC<GoogleSyncPanelProps> = ({
             >
               🧹 Clean everything
             </button>
+          </div>
+
+          {/* ── Storage policy (which audio lives in Drive) ── */}
+          <div style={{ marginTop: 16 }}>
+            <label style={{ display: "block", fontSize: 14, color: "var(--text-secondary)", marginBottom: 6 }}>
+              Audio in Drive
+            </label>
+            <select
+              className="settings-input"
+              value={audioMode}
+              onChange={(e) => onAudioModeChange?.(e.target.value as AudioMode)}
+              style={{ width: "100%", maxWidth: 320, padding: "10px 12px", fontSize: 15 }}
+            >
+              <option value="selected">Only marked tracks (recommended)</option>
+              <option value="all">Every track (full cloud backup)</option>
+              <option value="none">Never upload audio</option>
+            </select>
+            <p style={{ fontSize: 12, color: "var(--text-tertiary)", marginTop: 8, lineHeight: 1.5 }}>
+              Metadata, favourites, ratings, progress and playlists always sync. Audio is uploaded only
+              for tracks you mark <strong>Available offline</strong>
+              {offlineCount > 0 ? ` (${offlineCount} marked)` : ""}.
+            </p>
           </div>
         </div>
       ) : (

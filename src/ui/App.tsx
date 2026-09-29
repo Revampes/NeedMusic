@@ -23,6 +23,7 @@ import QueuePanel from "@ui/components/QueuePanel";
 import LyricsPanel from "@ui/components/LyricsPanel";
 import MarqueeText from "@ui/components/MarqueeText";
 import { useDesktopDriveSync, configureDesktopGoogleClientId } from "@ui/useDesktopDriveSync";
+import type { DesktopDriveSync } from "@ui/useDesktopDriveSync";
 import { DESKTOP_GOOGLE_CLIENT_ID, DESKTOP_GOOGLE_CLIENT_SECRET } from "@core/services/cloudConfig";
 import { songKeyOf } from "@core/services/cloudsync";
 
@@ -118,6 +119,58 @@ const App: React.FC = () => {
     clientId: DESKTOP_GOOGLE_CLIENT_ID,
     clientSecret: DESKTOP_GOOGLE_CLIENT_SECRET,
   });
+
+  // ── Drive storage UI state ──
+  const [reclaimBusy, setReclaimBusy] = useState(false);
+  const [reclaimResult, setReclaimResult] = useState<string | null>(null);
+  const handleReclaimDriveSpace = useCallback(async () => {
+    setReclaimBusy(true);
+    setReclaimResult(null);
+    try {
+      const removed = await driveSync.reclaimDriveAudio();
+      setReclaimResult(
+        removed > 0
+          ? `Freed ${removed} file${removed === 1 ? "" : "s"} from Drive.`
+          : "Nothing to reclaim — every stored track is still in use.",
+      );
+    } catch (e) {
+      setReclaimResult(`Could not reclaim: ${String((e as any)?.message ?? e)}`);
+    } finally {
+      setReclaimBusy(false);
+    }
+  }, [driveSync]);
+  // How many songs this device wants kept available in Drive (for the panel copy).
+  const driveOfflineCount = useMemo(
+    () => driveSync.mergedInfo.audioRequests.size,
+    [driveSync.mergedInfo.audioRequests],
+  );
+  // Songs that live in Drive but are NOT in this library yet — the user can pull
+  // them down here. Previously such tracks were invisible on the desktop, so a
+  // Drive-only song could never be downloaded onto this device.
+  const driveDownloadable = useMemo(() => {
+    const localKeys = new Set(tracks.map((t) => songKeyOf(t)));
+    return driveSync.mergedInfo.tracks
+      .filter((t) => t.driveFileId && !localKeys.has(t.songKey))
+      .map((t) => ({
+        songKey: t.songKey,
+        title: t.title || t.songKey,
+        artist: t.artist || "",
+        sizeBytes: t.audioSizeBytes,
+      }));
+  }, [driveSync.mergedInfo.tracks, tracks]);
+  const [driveDownloadingKey, setDriveDownloadingKey] = useState<string | null>(null);
+  const handleDownloadDriveTrack = useCallback(async (songKey: string) => {
+    setDriveDownloadingKey(songKey);
+    setReclaimResult(null);
+    try {
+      const ok = await driveSync.downloadTrackToLibrary(songKey);
+      if (!ok) {
+        setReclaimResult("Couldn't download that track — sign in to Drive and check it still has audio.");
+      }
+    } finally {
+      setDriveDownloadingKey(null);
+    }
+  }, [driveSync]);
   const splashStartRef = useRef(performance.now());
   const keydownCleanupRef = useRef<(() => void) | null>(null);
   const hotkeyUnlistenRef = useRef<(() => void) | null>(null);
@@ -125,6 +178,13 @@ const App: React.FC = () => {
   // Listening-time accounting for the activity stats: `onProgressChange` ticks
   // ~4x/second, so we accumulate real seconds here and bank them in batches.
   const listenRef = useRef({ lastPos: 0, pending: 0, playing: false });
+  // Late-bound handle to the Drive sync (created further down) so the player
+  // callbacks can persist resume positions without a circular dependency.
+  const driveSyncRef = useRef<DesktopDriveSync | null>(null);
+  // The track the player is currently on (resume positions are written for it).
+  const currentTrackRef = useRef<Track | ITrack | null>(null);
+  // Publish the Drive handle for the player callbacks below.
+  driveSyncRef.current = driveSync;
 
   /**
    * Persist the seconds listened since the last flush. Only whole seconds are
@@ -140,6 +200,27 @@ const App: React.FC = () => {
       .addListeningSeconds(whole)
       .then(() => window.dispatchEvent(new CustomEvent("listeningActivity")))
       .catch(() => { /* stats are best-effort */ });
+  }, []);
+
+  /**
+   * Persist where playback stopped for the CURRENT track, so another device can
+   * resume there (LWW by timestamp). Throttled: only written every
+   * POSITION_FLUSH_MS and only when it moved by more than a few seconds, so a
+   * running player doesn't rewrite Drive every sync cycle.
+   */
+  const POSITION_FLUSH_MS = 30000;
+  const positionRef = useRef({ songKey: "", secs: 0, lastAt: 0 });
+  const flushPosition = useCallback((currentTrack: Track | ITrack | null, secs: number) => {
+    if (!currentTrack || !(secs > 5)) return;
+    const key = songKeyOf(currentTrack as any);
+    if (!key) return;
+    const P = positionRef.current;
+    const now = Date.now();
+    const sameSong = P.songKey === key;
+    const movedEnough = Math.abs(secs - P.secs) > 5;
+    if (sameSong && now - P.lastAt < POSITION_FLUSH_MS && !movedEnough) return;
+    positionRef.current = { songKey: key, secs, lastAt: now };
+    driveSyncRef.current?.setResumePosition(key, secs).catch(() => { /* best-effort */ });
   }, []);
 
   // Bank whatever is still pending when the window closes or is hidden —
@@ -247,6 +328,8 @@ const App: React.FC = () => {
           if (L.playing && !nowPlaying) {
             L.playing = false;
             flushListening();
+            // Remember where we stopped so another device can resume here.
+            flushPosition(currentTrackRef.current, L.lastPos);
           } else if (!L.playing && nowPlaying) {
             L.playing = true;
           }
@@ -256,9 +339,26 @@ const App: React.FC = () => {
           // The new track restarts at 0 — bank the previous track's time first
           // and reset the position baseline so the jump isn't counted.
           flushListening();
+          flushPosition(currentTrackRef.current, listenRef.current.lastPos);
           listenRef.current.lastPos = 0;
+          currentTrackRef.current = (t as Track) ?? null;
           if (t) {
             DatabaseManager.getInstance().recordPlay().catch(() => {});
+            // Resume where this song was last left (synced from any device).
+            const resumeSecs = Number((t as Track).resumePositionSecs) || 0;
+            const dur = Number(t.durationSecs) || 0;
+            if (resumeSecs > 5 && (!dur || resumeSecs < dur - 10)) {
+              const id = (t as Track).id;
+              // Give the audio sink a moment to load, then only seek if we are
+              // still on the same track (the user may have skipped already).
+              window.setTimeout(() => {
+                try {
+                  if (engine.currentTrack?.id === id) {
+                    engine.seek(resumeSecs).catch(() => { /* ignore */ });
+                  }
+                } catch { /* ignore */ }
+              }, 400);
+            }
           }
           setPlayer((p) => ({
             ...p, currentTrack: t, currentTimeSecs: 0,
@@ -273,6 +373,8 @@ const App: React.FC = () => {
             // Ignore seeks: only count small forward steps between ticks.
             if (delta > 0 && delta <= 5) L.pending += delta;
             if (L.pending >= 15) flushListening();
+            // Throttled inside: writes at most every 30s per track.
+            flushPosition(currentTrackRef.current, cur);
           }
           L.lastPos = cur;
           setPlayer((p) => ({
@@ -781,6 +883,15 @@ const App: React.FC = () => {
                    onOpenGuide={() => {
                      try { window.open("https://github.com/Revampes/NeedMusic/blob/main/docs/google-drive-sync.md", "_blank"); } catch { /* ignore */ }
                    }}
+                   audioMode={driveSync.audioMode}
+                   onAudioModeChange={driveSync.setAudioMode}
+                   offlineCount={driveOfflineCount}
+                   onReclaimDriveSpace={() => { void handleReclaimDriveSpace(); }}
+                   reclaimBusy={reclaimBusy}
+                   reclaimResult={reclaimResult}
+                   downloadableTracks={driveDownloadable}
+                   onDownloadTrack={(key) => { void handleDownloadDriveTrack(key); }}
+                   downloadingKey={driveDownloadingKey}
                  />
                </div>
              ) :
@@ -789,7 +900,7 @@ const App: React.FC = () => {
                  onTracksLoaded={setTracks}
                />
              ) :
-             <TrackListView tracks={filteredTracks} currentTrack={ct} onPlay={handlePlayTrack} onToggleFav={handleToggleFavorite} onRemove={handleRemoveTrack} onTitleChange={handleTitleChange} onPlaylistChanged={(ids) => { ids?.forEach((id) => driveSync.touchPlaylist(id)); setPlaylistVersion((v) => v + 1); }} />}
+             <TrackListView tracks={filteredTracks} currentTrack={ct} onPlay={handlePlayTrack} onToggleFav={handleToggleFavorite} onRemove={handleRemoveTrack} onTitleChange={handleTitleChange} onPlaylistChanged={(ids) => { ids?.forEach((id) => driveSync.touchPlaylist(id)); setPlaylistVersion((v) => v + 1); }} driveSync={driveSync} />}
           </div>
         </div>
           {showLyrics ? (
@@ -897,8 +1008,8 @@ export default App;
 
 // ─── Sub-Views ────────────────────────────────────────
 
-const TrackListView: React.FC<{ tracks: Track[]; currentTrack: ITrack | null; onPlay: (t: Track) => void; onToggleFav: (t: Track) => void; onRemove: (t: Track) => void; onTitleChange: (t: Track, newTitle: string) => void; onPlaylistChanged?: (touchedPlaylistIds: string[]) => void }> =
-  ({ tracks, currentTrack, onPlay, onToggleFav, onRemove, onTitleChange, onPlaylistChanged }) => {
+const TrackListView: React.FC<{ tracks: Track[]; currentTrack: ITrack | null; onPlay: (t: Track) => void; onToggleFav: (t: Track) => void; onRemove: (t: Track) => void; onTitleChange: (t: Track, newTitle: string) => void; onPlaylistChanged?: (touchedPlaylistIds: string[]) => void; driveSync?: DesktopDriveSync }> =
+  ({ tracks, currentTrack, onPlay, onToggleFav, onRemove, onTitleChange, onPlaylistChanged, driveSync }) => {
     const [editingId, setEditingId] = React.useState<string | null>(null);
     const [editValue, setEditValue] = React.useState("");
     const [playlistTarget, setPlaylistTarget] = React.useState<Track | null>(null);
@@ -931,7 +1042,7 @@ const TrackListView: React.FC<{ tracks: Track[]; currentTrack: ITrack | null; on
       <div className="track-list-header">
         <span className="col-fav">#</span><span className="col-title">Title</span>
         <span className="col-artist">Artist</span><span className="col-album">Album</span>
-        <span className="col-dur"><IconClock size={12} style={{ marginRight: 2 }} /></span><span className="col-add" /><span className="col-remove" />
+        <span className="col-dur"><IconClock size={12} style={{ marginRight: 2 }} /></span><span className="col-rate" /><span className="col-offline" title="Available offline / in Drive">☁</span><span className="col-add" /><span className="col-remove" />
       </div>
       {tracks.length === 0 ? <div className="track-empty">No tracks found.</div> : tracks.map((t) => (
         <div
@@ -980,6 +1091,32 @@ const TrackListView: React.FC<{ tracks: Track[]; currentTrack: ITrack | null; on
           <span className="col-artist"><span className="multiline-text">{t.artist}</span></span>
           <span className="col-album"><span className="multiline-text">{t.album}</span></span>
           <span className="col-dur">{t.formatDuration()}</span>
+          <span className="col-rate" onClick={(e) => e.stopPropagation()}>
+            {[1, 2, 3, 4, 5].map((n) => (
+              <button
+                key={n}
+                className={`rate-star ${Track.clampRating(t.rating) >= n ? "on" : ""}`}
+                title={Track.clampRating(t.rating) === n ? "Clear rating" : `Rate ${n} of 5`}
+                onClick={(e) => {
+                  e.stopPropagation();
+                  const next = Track.clampRating(t.rating) === n ? 0 : n;
+                  if (driveSync) void driveSync.setRating(songKeyOf(t), next);
+                }}
+              >{Track.clampRating(t.rating) >= n ? "★" : "☆"}</button>
+            ))}
+          </span>
+          <span
+            className={`col-offline ${driveSync?.mergedInfo.audioRequests.has(songKeyOf(t)) ? "on" : ""}`}
+            title={driveSync?.mergedInfo.audioRequests.has(songKeyOf(t))
+              ? "Available offline — click to stop keeping it in Drive"
+              : "Keep this song available offline (uploads its audio to Drive)"}
+            onClick={(e) => {
+              e.stopPropagation();
+              if (!driveSync) return;
+              const key = songKeyOf(t);
+              driveSync.setTrackOffline(key, !driveSync.mergedInfo.audioRequests.has(key));
+            }}
+          >☁</span>
           <span className="col-add" title="Add to playlist" onClick={(e) => { e.stopPropagation(); setPlaylistTarget(t); }}><IconPlus size={14} /></span>
           <span className="col-remove" title="Remove from library" onClick={(e) => { e.stopPropagation(); onRemove(t); }}><IconClose size={12} /></span>
         </div>
