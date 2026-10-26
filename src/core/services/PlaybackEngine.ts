@@ -455,6 +455,9 @@ export class PlaybackEngine {
           );
           // Reset baseline so we don't immediately re-trigger.
           this.lastRustPos = -1.0;
+          // Recreate the native output stream first. This handles a WASAPI
+          // device that remains open but has stopped emitting audio.
+          await invoke("reopen_audio_output").catch(() => {});
           await this.seek(clientPos);
           return;
         }

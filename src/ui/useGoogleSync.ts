@@ -28,6 +28,7 @@ import {
   saveOwnSyncFile,
   cacheToken,
   getCachedToken,
+  getCachedTokenExpiry,
   clearCachedCredentials,
   getGoogleClientId,
   hasGoogleClientId,
@@ -140,7 +141,10 @@ export function useGoogleSync({
     try {
       const access = await provider();
       if (!access) return false;
-      cacheToken(access);
+      // Refresh responses are normally valid for one hour. Keeping an
+      // expiry lets the next app launch renew proactively instead of using a
+      // stale token until the first Drive request fails.
+      cacheToken(access, 3600);
       tokenRef.current = access;
       setToken(access);
       authRetriedRef.current = true;
@@ -224,9 +228,17 @@ export function useGoogleSync({
    * never wiped out by another device's older snapshot during apply.
    */
   const syncCycle = useCallback(async () => {
-    const tk = tokenRef.current;
+    let tk = tokenRef.current;
     if (!tk) return;
     if (!readyRef.current) return;
+
+    // Access tokens returned by the desktop PKCE flow have no expiry stored
+    // by older versions, so only renew when a known expiry is near.  A 401
+    // still uses the existing retry path below for unknown/legacy tokens.
+    const expiresAt = getCachedTokenExpiry();
+    if (expiresAt > 0 && expiresAt - Date.now() < 120_000) {
+      if (await refreshTokenNow()) tk = tokenRef.current;
+    }
 
     // 0) Push our own file (if it changed since our last push, or never pushed).
     let ourFile: DeviceSyncFile;
@@ -314,7 +326,7 @@ export function useGoogleSync({
       try {
         const accessToken = await browserAuth(clientId, SYNC_SCOPE);
         if (!accessToken) { setter({ state: "error", detail: "Authorization cancelled or timed out." }); return; }
-        cacheToken(accessToken);
+        cacheToken(accessToken, 3600);
         setToken(accessToken);
         setter({ state: "synced", detail: "Signed in — syncing…", at: new Date().toISOString() });
       } catch (e: any) {

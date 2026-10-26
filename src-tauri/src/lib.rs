@@ -321,6 +321,11 @@ async fn stop_audio(state: State<'_, AppState>) -> Result<(), String> {
 }
 
 #[tauri::command]
+async fn reopen_audio_output(state: State<'_, AppState>) -> Result<(), String> {
+    state.audio.reopen_output()
+}
+
+#[tauri::command]
 async fn seek_audio(secs: f64, state: State<'_, AppState>) -> Result<(), String> {
     state.audio.seek(secs)
 }
@@ -1214,6 +1219,7 @@ pub fn run() {
             pause_audio,
             resume_audio,
             stop_audio,
+            reopen_audio_output,
             seek_audio,
             set_audio_volume,
             set_playback_rate,

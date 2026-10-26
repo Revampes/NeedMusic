@@ -1430,8 +1430,6 @@ const WebApp: React.FC = () => {
                   hasConfig={driveSync.hasConfig}
                   onSignIn={driveSync.signIn}
                   onSignOut={driveSync.signOut}
-                  onUpload={driveSync.upload}
-                  onDownload={driveSync.download}
                   onClean={() => {
                     if (window.confirm("Delete ALL Google Drive sync data (sync list + uploaded audio), reset this device's sync state, AND remove every track from this device (local library + stored/downloaded audio)? This is permanent and cannot be undone.")) {
                       // Wipe this device's local library + stored/downloaded audio.

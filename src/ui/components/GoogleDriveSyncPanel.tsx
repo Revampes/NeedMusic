@@ -17,8 +17,6 @@ export interface GoogleSyncPanelProps {
   hasConfig: boolean;
   onSignIn: () => void;
   onSignOut: () => void;
-  onUpload: () => void;
-  onDownload: () => void;
   onClean: () => void;
   onOpenGuide: () => void;
   /** Layer-2 policy: what audio this device uploads to Drive. */
@@ -30,11 +28,6 @@ export interface GoogleSyncPanelProps {
   onReclaimDriveSpace?: () => void;
   reclaimBusy?: boolean;
   reclaimResult?: string | null;
-  /** Songs that exist in Drive (with audio) but are NOT in this library yet. */
-  downloadableTracks?: { songKey: string; title: string; artist: string; sizeBytes?: number }[];
-  /** Download one of those into this device's library. */
-  onDownloadTrack?: (songKey: string) => void;
-  downloadingKey?: string | null;
 }
 
 function statusText(status: GoogleSyncPanelProps["status"]): string {
@@ -57,8 +50,6 @@ const GoogleDriveSyncPanel: React.FC<GoogleSyncPanelProps> = ({
   hasConfig,
   onSignIn,
   onSignOut,
-  onUpload,
-  onDownload,
   onClean,
   onOpenGuide,
   audioMode = "selected",
@@ -67,9 +58,6 @@ const GoogleDriveSyncPanel: React.FC<GoogleSyncPanelProps> = ({
   onReclaimDriveSpace,
   reclaimBusy = false,
   reclaimResult = null,
-  downloadableTracks = [],
-  onDownloadTrack,
-  downloadingKey = null,
 }) => {
   const busy = status.state === "authorizing" || status.state === "syncing";
   const error = status.state === "error";
@@ -86,8 +74,8 @@ const GoogleDriveSyncPanel: React.FC<GoogleSyncPanelProps> = ({
       </h3>
       <p style={{ fontSize: 11, color: "var(--text-secondary)", marginBottom: 10, lineHeight: 1.5 }}>
         Store your tracks/favorites/playlists in your own Google Drive (private{" "}
-        <code>appDataFolder</code>). <strong>Upload</strong> pushes this device to Drive;{" "}
-        <strong>Download</strong> pulls Drive tracks not already here. No automatic sync.{" "}
+        <code>appDataFolder</code>). Changes sync automatically in the background{" "}
+        across your devices.{" "}
         <button
           onClick={onOpenGuide}
           style={{ background: "none", border: "none", color: "var(--accent-primary)", cursor: "pointer", fontWeight: 600, padding: 0, fontSize: 11 }}
@@ -129,12 +117,6 @@ const GoogleDriveSyncPanel: React.FC<GoogleSyncPanelProps> = ({
             </span>
           </div>
           <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
-            <button className="settings-btn" onClick={onUpload} disabled={busy} style={{ fontSize: 12 }}>
-              Upload
-            </button>
-            <button className="settings-btn" onClick={onDownload} disabled={busy} style={{ fontSize: 12 }}>
-              Download
-            </button>
             <button className="settings-btn" onClick={onSignOut} style={{ fontSize: 12, color: "var(--color-error)", background: "transparent", border: "1px solid var(--color-error)" }}>
               Sign out
             </button>
@@ -177,35 +159,6 @@ const GoogleDriveSyncPanel: React.FC<GoogleSyncPanelProps> = ({
               </div>
             )}
 
-            {/* ── Songs in Drive that are not in this library yet ── */}
-            {downloadableTracks.length > 0 && (
-              <div style={{ marginTop: 12 }}>
-                <div style={{ fontSize: 10, fontWeight: 600, textTransform: "uppercase", letterSpacing: 0.5, color: "var(--text-tertiary)", marginBottom: 6 }}>
-                  In Drive, not on this device ({downloadableTracks.length})
-                </div>
-                <div style={{ maxHeight: 220, overflowY: "auto", display: "flex", flexDirection: "column", gap: 4 }}>
-                  {downloadableTracks.map((t) => (
-                    <div key={t.songKey} style={{ display: "flex", alignItems: "center", gap: 8, padding: "5px 6px", borderRadius: 6, background: "var(--glass-bg)" }}>
-                      <span style={{ flex: 1, minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", fontSize: 12 }}>
-                        {t.title}{t.artist ? <span style={{ color: "var(--text-tertiary)" }}> · {t.artist}</span> : null}
-                      </span>
-                      <button
-                        className="settings-btn"
-                        disabled={downloadingKey === t.songKey}
-                        onClick={() => onDownloadTrack?.(t.songKey)}
-                        title="Download this track onto this device"
-                        style={{ fontSize: 11, padding: "3px 8px", flexShrink: 0 }}
-                      >
-                        {downloadingKey === t.songKey ? "Downloading…" : "⬇ Download"}
-                      </button>
-                    </div>
-                  ))}
-                </div>
-                <p style={{ fontSize: 10, color: "var(--text-tertiary)", marginTop: 6, lineHeight: 1.5 }}>
-                  These songs are synced from another device. Downloading keeps a copy here and on Drive.
-                </p>
-              </div>
-            )}
           </div>
         </>
       ) : (

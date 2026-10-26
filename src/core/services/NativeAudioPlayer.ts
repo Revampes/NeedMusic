@@ -41,7 +41,20 @@ export class NativeAudioPlayer implements IAudioOutput {
       throw e;
     }
 
-    await invoke("play_audio", { filePath: resolvedPath });
+    try {
+      await invoke("play_audio", { filePath: resolvedPath });
+    } catch (error) {
+      // The Windows output device can disappear after sleep or a device
+      // change while the process remains alive. Recreate the stream once
+      // before surfacing the original playback failure.
+      try {
+        await invoke("reopen_audio_output");
+        await invoke("play_audio", { filePath: resolvedPath });
+      } catch {
+        this._playing = false;
+        throw error;
+      }
+    }
     await invoke("set_audio_volume", { volume: this._volume });
     await invoke("set_playback_rate", { rate: this._rate });
 

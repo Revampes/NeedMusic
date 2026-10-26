@@ -147,30 +147,6 @@ const App: React.FC = () => {
   // Songs that live in Drive but are NOT in this library yet — the user can pull
   // them down here. Previously such tracks were invisible on the desktop, so a
   // Drive-only song could never be downloaded onto this device.
-  const driveDownloadable = useMemo(() => {
-    const localKeys = new Set(tracks.map((t) => songKeyOf(t)));
-    return driveSync.mergedInfo.tracks
-      .filter((t) => t.driveFileId && !localKeys.has(t.songKey))
-      .map((t) => ({
-        songKey: t.songKey,
-        title: t.title || t.songKey,
-        artist: t.artist || "",
-        sizeBytes: t.audioSizeBytes,
-      }));
-  }, [driveSync.mergedInfo.tracks, tracks]);
-  const [driveDownloadingKey, setDriveDownloadingKey] = useState<string | null>(null);
-  const handleDownloadDriveTrack = useCallback(async (songKey: string) => {
-    setDriveDownloadingKey(songKey);
-    setReclaimResult(null);
-    try {
-      const ok = await driveSync.downloadTrackToLibrary(songKey);
-      if (!ok) {
-        setReclaimResult("Couldn't download that track — sign in to Drive and check it still has audio.");
-      }
-    } finally {
-      setDriveDownloadingKey(null);
-    }
-  }, [driveSync]);
   const splashStartRef = useRef(performance.now());
   const keydownCleanupRef = useRef<(() => void) | null>(null);
   const hotkeyUnlistenRef = useRef<(() => void) | null>(null);
@@ -873,8 +849,6 @@ const App: React.FC = () => {
                    hasConfig={driveSync.hasConfig}
                    onSignIn={driveSync.signIn}
                    onSignOut={driveSync.signOut}
-                   onUpload={driveSync.upload}
-                   onDownload={driveSync.download}
                    onClean={() => {
                      if (window.confirm("Delete ALL Google Drive sync data (sync list + uploaded audio), reset this device's sync state, AND remove every track from this device (library + audio files)? This is permanent and cannot be undone.")) {
                        driveSync.clean().catch(() => { /* keep UI stable */ });
@@ -889,9 +863,6 @@ const App: React.FC = () => {
                    onReclaimDriveSpace={() => { void handleReclaimDriveSpace(); }}
                    reclaimBusy={reclaimBusy}
                    reclaimResult={reclaimResult}
-                   downloadableTracks={driveDownloadable}
-                   onDownloadTrack={(key) => { void handleDownloadDriveTrack(key); }}
-                   downloadingKey={driveDownloadingKey}
                  />
                </div>
              ) :

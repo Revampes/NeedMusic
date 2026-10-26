@@ -19,7 +19,7 @@ use std::sync::Mutex;
 use crate::audio_eq::Equalizer;
 
 pub struct NativeAudioPlayer {
-    stream_handle: OutputStreamHandle,
+    stream_handle: Mutex<OutputStreamHandle>,
     sink: Mutex<Option<Sink>>,
     current_path: Mutex<Option<String>>,
     current_duration: Mutex<f64>,
@@ -33,7 +33,7 @@ pub struct NativeAudioPlayer {
 impl NativeAudioPlayer {
     pub fn new(stream_handle: OutputStreamHandle) -> Self {
         Self {
-            stream_handle,
+            stream_handle: Mutex::new(stream_handle),
             sink: Mutex::new(None),
             current_path: Mutex::new(None),
             current_duration: Mutex::new(0.0),
@@ -218,7 +218,8 @@ impl NativeAudioPlayer {
             .unwrap_or(0.0);
         let final_dur = if dur > 0.0 { dur } else { dur_from_samples };
 
-        let sink = Sink::try_new(&self.stream_handle)
+        let stream_handle = self.stream_handle.lock().map_err(|e| e.to_string())?;
+        let sink = Sink::try_new(&*stream_handle)
             .map_err(|e| format!("Sink: {}", e))?;
         let rate = *self.playback_rate.lock().map_err(|e| e.to_string())?;
         sink.set_speed(rate);
@@ -229,6 +230,23 @@ impl NativeAudioPlayer {
         *self.current_path.lock().map_err(|e| e.to_string())? =
             Some(file_path.to_string());
         *self.current_duration.lock().map_err(|e| e.to_string())? = final_dur;
+        Ok(())
+    }
+
+    /// Reopen the Windows output device after a sleep/device-change event.
+    /// WASAPI can leave an existing stream alive but unable to emit audio.
+    pub fn reopen_output(&self) -> Result<(), String> {
+        // Keep the current path and duration: the caller may immediately
+        // rebuild the sink at the current position.
+        if let Ok(mut g) = self.sink.lock() {
+            if let Some(s) = g.take() {
+                s.stop();
+            }
+        }
+        let (_stream, handle) =
+            rodio::OutputStream::try_default().map_err(|e| format!("Audio output: {}", e))?;
+        std::mem::forget(_stream);
+        *self.stream_handle.lock().map_err(|e| e.to_string())? = handle;
         Ok(())
     }
 
@@ -297,7 +315,8 @@ impl NativeAudioPlayer {
                 remaining,
             );
 
-            let sink = Sink::try_new(&self.stream_handle)
+            let stream_handle = self.stream_handle.lock().map_err(|e| e.to_string())?;
+            let sink = Sink::try_new(&*stream_handle)
                 .map_err(|e| format!("Sink: {}", e))?;
             let rate = *self.playback_rate.lock().map_err(|e| e.to_string())?;
             sink.set_volume(vol);

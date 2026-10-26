@@ -18,8 +18,6 @@ export interface GoogleSyncPanelProps {
   hasConfig: boolean;
   onSignIn: () => void;
   onSignOut: () => void;
-  onUpload: () => void;
-  onDownload: () => void;
   onClean: () => void;
   onOpenGuide: () => void;
   /** Layer-2 policy: what audio this device uploads to Drive. */
@@ -51,8 +49,6 @@ const GoogleDriveSyncPanel: React.FC<GoogleSyncPanelProps> = ({
   hasConfig,
   onSignIn,
   onSignOut,
-  onUpload,
-  onDownload,
   onClean,
   onOpenGuide,
   audioMode = "selected",
@@ -102,20 +98,6 @@ const GoogleDriveSyncPanel: React.FC<GoogleSyncPanelProps> = ({
             </span>
           </div>
           <div style={{ display: "flex", gap: 10, marginTop: 14, flexWrap: "wrap" }}>
-            <button
-              onClick={onUpload}
-              disabled={busy}
-              style={{ padding: "10px 16px", background: "#333", color: "#fff", border: "none", borderRadius: 6, cursor: "pointer", fontSize: 15 }}
-            >
-              Upload
-            </button>
-            <button
-              onClick={onDownload}
-              disabled={busy}
-              style={{ padding: "10px 16px", background: "#2f6fed", color: "#fff", border: "none", borderRadius: 6, cursor: "pointer", fontSize: 15 }}
-            >
-              Download
-            </button>
             <button
               onClick={onSignOut}
               style={{ padding: "10px 16px", background: "transparent", color: "var(--color-error)", border: "1px solid var(--color-error)", borderRadius: 6, cursor: "pointer", fontSize: 15 }}

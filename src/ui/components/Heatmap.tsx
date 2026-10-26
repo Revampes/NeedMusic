@@ -62,6 +62,7 @@ function getIntensity(count: number): number {
  */
 const Heatmap: React.FC<HeatmapProps> = ({ weeks: weeksOverride }) => {
   const [activity, setActivity] = useState<Map<string, DayActivity>>(new Map());
+  const [activityError, setActivityError] = useState<string | null>(null);
   const [tooltip, setTooltip] = useState<{ date: string; count: number; seconds: number; x: number; y: number } | null>(null);
 
   const todayStr = useMemo(() => formatLocalDate(new Date()), []);
@@ -87,20 +88,39 @@ const Heatmap: React.FC<HeatmapProps> = ({ weeks: weeksOverride }) => {
   // `getDailyActivityMerged` prefers the cross-device totals written by the
   // Drive sync merge, falling back to this device's own history when sync is off.
   const loadActivity = useCallback(async () => {
-    const map = await DatabaseManager.getInstance().getDailyActivityMerged(totalWeeks * 7);
-    setActivity(map);
+    try {
+      const map = await DatabaseManager.getInstance().getDailyActivityMerged(totalWeeks * 7);
+      setActivity(map);
+      setActivityError(null);
+    } catch (error) {
+      // A partially migrated database should not make the entire Home page
+      // appear broken. The local history remains a valid fallback.
+      try {
+        const map = await DatabaseManager.getInstance().getDailyActivity(totalWeeks * 7);
+        setActivity(map);
+        setActivityError(null);
+      } catch (fallbackError) {
+        console.error("[Heatmap] Failed to load listening activity:", error, fallbackError);
+        setActivityError("Listening activity is temporarily unavailable.");
+      }
+    }
   }, [totalWeeks]);
 
   useEffect(() => {
-    loadActivity().catch(() => { /* no history yet */ });
+    void loadActivity();
   }, [loadActivity]);
 
   // Re-read when a new day's activity lands (the parent bumps this on progress
   // flushes), so the totals stay fresh without a page reload.
   useEffect(() => {
-    const onActivity = () => { loadActivity().catch(() => {}); };
+    const onActivity = () => { void loadActivity(); };
+    const onFocus = () => { void loadActivity(); };
     window.addEventListener("listeningActivity", onActivity);
-    return () => window.removeEventListener("listeningActivity", onActivity);
+    window.addEventListener("focus", onFocus);
+    return () => {
+      window.removeEventListener("listeningActivity", onActivity);
+      window.removeEventListener("focus", onFocus);
+    };
   }, [loadActivity]);
 
   // ── Totals + per-month breakdown ──
@@ -242,7 +262,7 @@ const Heatmap: React.FC<HeatmapProps> = ({ weeks: weeksOverride }) => {
       <div className="heatmap-header">
         <h3 className="heatmap-title">Listening Activity</h3>
         <span className="heatmap-total">
-          {stats.yearPlays} plays · {formatListeningTime(stats.yearSeconds)} in {stats.year}
+          {activityError ?? `${stats.yearPlays} plays · ${formatListeningTime(stats.yearSeconds)} in ${stats.year}`}
         </span>
       </div>
 
