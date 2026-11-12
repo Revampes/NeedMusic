@@ -154,6 +154,10 @@ const App: React.FC = () => {
   // Listening-time accounting for the activity stats: `onProgressChange` ticks
   // ~4x/second, so we accumulate real seconds here and bank them in batches.
   const listenRef = useRef({ lastPos: 0, pending: 0, playing: false });
+  // Incremented whenever PlaybackEngine announces a track change. This lets
+  // the state observer count resume() calls without double-counting the
+  // setState(Playing) that happens just before a track-change callback.
+  const trackChangeVersionRef = useRef(0);
   // Late-bound handle to the Drive sync (created further down) so the player
   // callbacks can persist resume positions without a circular dependency.
   const driveSyncRef = useRef<DesktopDriveSync | null>(null);
@@ -308,10 +312,24 @@ const App: React.FC = () => {
             flushPosition(currentTrackRef.current, L.lastPos);
           } else if (!L.playing && nowPlaying) {
             L.playing = true;
+            const observedTrackChange = trackChangeVersionRef.current;
+            queueMicrotask(() => {
+              // play()/next() notify the track change in the same turn. A
+              // resume() does not, and still represents a newly started play.
+              if (trackChangeVersionRef.current !== observedTrackChange) return;
+              const current = engine.currentTrack;
+              if (!current) return;
+              DatabaseManager.getInstance().recordPlay()
+                .then(() => {
+                  window.dispatchEvent(new CustomEvent("listeningActivity"));
+                })
+                .catch(() => {});
+            });
           }
           setPlayer((p) => ({ ...p, playbackState: s }));
         },
         onTrackChange: (t) => {
+          trackChangeVersionRef.current++;
           // The new track restarts at 0 — bank the previous track's time first
           // and reset the position baseline so the jump isn't counted.
           flushListening();
@@ -319,7 +337,9 @@ const App: React.FC = () => {
           listenRef.current.lastPos = 0;
           currentTrackRef.current = (t as Track) ?? null;
           if (t) {
-            DatabaseManager.getInstance().recordPlay().catch(() => {});
+            DatabaseManager.getInstance().recordPlay()
+              .then(() => window.dispatchEvent(new CustomEvent("listeningActivity")))
+              .catch(() => {});
             // Resume where this song was last left (synced from any device).
             const resumeSecs = Number((t as Track).resumePositionSecs) || 0;
             const dur = Number(t.durationSecs) || 0;
@@ -1013,7 +1033,7 @@ const TrackListView: React.FC<{ tracks: Track[]; currentTrack: ITrack | null; on
       <div className="track-list-header">
         <span className="col-fav">#</span><span className="col-title">Title</span>
         <span className="col-artist">Artist</span><span className="col-album">Album</span>
-        <span className="col-dur"><IconClock size={12} style={{ marginRight: 2 }} /></span><span className="col-rate" /><span className="col-offline" title="Available offline / in Drive">☁</span><span className="col-add" /><span className="col-remove" />
+        <span className="col-dur"><IconClock size={12} style={{ marginRight: 2 }} /></span><span className="col-offline" title="Available offline / in Drive">☁</span><span className="col-add" /><span className="col-remove" />
       </div>
       {tracks.length === 0 ? <div className="track-empty">No tracks found.</div> : tracks.map((t) => (
         <div
@@ -1062,20 +1082,6 @@ const TrackListView: React.FC<{ tracks: Track[]; currentTrack: ITrack | null; on
           <span className="col-artist"><span className="multiline-text">{t.artist}</span></span>
           <span className="col-album"><span className="multiline-text">{t.album}</span></span>
           <span className="col-dur">{t.formatDuration()}</span>
-          <span className="col-rate" onClick={(e) => e.stopPropagation()}>
-            {[1, 2, 3, 4, 5].map((n) => (
-              <button
-                key={n}
-                className={`rate-star ${Track.clampRating(t.rating) >= n ? "on" : ""}`}
-                title={Track.clampRating(t.rating) === n ? "Clear rating" : `Rate ${n} of 5`}
-                onClick={(e) => {
-                  e.stopPropagation();
-                  const next = Track.clampRating(t.rating) === n ? 0 : n;
-                  if (driveSync) void driveSync.setRating(songKeyOf(t), next);
-                }}
-              >{Track.clampRating(t.rating) >= n ? "★" : "☆"}</button>
-            ))}
-          </span>
           <span
             className={`col-offline ${driveSync?.mergedInfo.audioRequests.has(songKeyOf(t)) ? "on" : ""}`}
             title={driveSync?.mergedInfo.audioRequests.has(songKeyOf(t))

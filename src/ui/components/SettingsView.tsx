@@ -92,10 +92,24 @@ const SettingsView: React.FC<Props> = ({ onTracksLoaded }) => {
 
   // Check yt-dlp availability
   useEffect(() => {
-    (async () => {
+    let stopped = false;
+    let timer: ReturnType<typeof setInterval> | undefined;
+    const check = async () => {
       const avail = await OnlineMusicService.getInstance().isYtDlpAvailable();
+      if (stopped) return;
       setYtDlpAvailable(avail);
-    })();
+      if (avail && timer) clearInterval(timer);
+    };
+    void check();
+    // The app bootstraps yt-dlp asynchronously. Keep Settings in step with
+    // that install, and recheck when users return after installing it.
+    timer = setInterval(() => { void check(); }, 4000);
+    window.addEventListener("focus", check);
+    return () => {
+      stopped = true;
+      if (timer) clearInterval(timer);
+      window.removeEventListener("focus", check);
+    };
   }, []);
 
   // Load download path

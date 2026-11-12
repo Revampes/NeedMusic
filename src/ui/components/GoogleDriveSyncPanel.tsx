@@ -142,7 +142,7 @@ const GoogleDriveSyncPanel: React.FC<GoogleSyncPanelProps> = ({
               </select>
             </label>
             <p style={{ fontSize: 10, color: "var(--text-tertiary)", margin: "4px 0 8px", lineHeight: 1.5 }}>
-              Metadata, favourites, ratings, progress and playlists always sync — they are tiny.
+              Metadata, favourites, progress and playlists always sync — they are tiny.
               Audio is uploaded only for tracks marked <strong>Available offline</strong>
               {offlineCount > 0 ? ` (${offlineCount} marked)` : ""}, so your Drive and your devices
               are never filled with copies you did not ask for. Tracks already in Drive are kept.

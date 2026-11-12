@@ -455,9 +455,27 @@ export class DatabaseManager {
   async recordPlay(dateStr?: string): Promise<void> {
     await this.ensureDb();
     const date = dateStr ?? formatLocalDate(new Date());
+    // Seed missing dates from this device before the local increment. This
+    // keeps older local activity visible when there has never been a Drive
+    // merge, and fills gaps without overwriting already-merged totals.
+    await this.db!.execute(
+      `INSERT OR IGNORE INTO play_stats_merged (date, count, seconds)
+       SELECT date, count, seconds FROM play_history`
+    );
     await this.db!.execute(
       `INSERT INTO play_history (date, count) VALUES ($1, 1)
        ON CONFLICT(date) DO UPDATE SET count = count + 1`,
+      [date]
+    );
+    // Keep the visible merged total responsive while Drive is offline or its
+    // next reconciliation cycle is pending. A successful sync replaces this
+    // provisional value with the aggregate built from per-device snapshots.
+    await this.db!.execute(
+      `INSERT INTO play_stats_merged (date, count, seconds)
+       SELECT date, count, seconds FROM play_history WHERE date = $1
+       ON CONFLICT(date) DO UPDATE SET
+         count = MAX(play_stats_merged.count + 1, excluded.count),
+         seconds = MAX(play_stats_merged.seconds, excluded.seconds)`,
       [date]
     );
   }

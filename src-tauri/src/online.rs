@@ -710,11 +710,44 @@ fn get_bilibili_lyrics_inner(bvid: &str, attempt: u8) -> Result<String, String> 
         return Err(format!("Lyrics API error ({}): {}", code, msg));
     }
 
-    let lyric = json["data"]["lyric"].as_str().unwrap_or("").trim().to_string();
-    if lyric.is_empty() {
-        return Err("No lyrics available for this video".to_string());
+    let lyric = json["data"]["lyric"].as_str().unwrap_or("").trim();
+    if !lyric.is_empty() {
+        return Ok(lyric.to_string());
     }
-    Ok(lyric)
+
+    // The documented player response exposes captions as subtitle tracks.
+    // Some videos use those captions as timed lyrics, so download and convert
+    // them to an LRC sidecar when a track is present.
+    let subtitles = json["data"]["subtitle"]["subtitles"]
+        .as_array()
+        .ok_or_else(|| "No lyrics or subtitles available for this video".to_string())?;
+    let subtitle_url = subtitles.iter()
+        .find_map(|s| s["subtitle_url"].as_str().filter(|u| !u.is_empty()))
+        .ok_or_else(|| "No lyrics or subtitles available for this video".to_string())?;
+    let subtitle_url = if subtitle_url.starts_with("//") {
+        format!("https:{}", subtitle_url)
+    } else {
+        subtitle_url.to_string()
+    };
+    let response: serde_json::Value = http_client()
+        .get(subtitle_url)
+        .header("Referer", "https://www.bilibili.com/")
+        .send().map_err(|e| format!("Subtitle download failed: {}", e))?
+        .error_for_status().map_err(|e| format!("Subtitle download failed: {}", e))?
+        .json().map_err(|e| format!("Subtitle response was invalid: {}", e))?;
+    let body = response["body"].as_array()
+        .ok_or_else(|| "Subtitle response had no text".to_string())?;
+    let mut lrc = String::new();
+    for line in body {
+        let start = line["from"].as_f64().unwrap_or(-1.0);
+        let text = line["content"].as_str().unwrap_or("").trim();
+        if start < 0.0 || text.is_empty() { continue; }
+        let minutes = (start / 60.0).floor() as u64;
+        let seconds = start - minutes as f64 * 60.0;
+        lrc.push_str(&format!("[{:02}:{:05.2}]{}\n", minutes, seconds, text));
+    }
+    if lrc.is_empty() { Err("No lyrics or subtitles available for this video".to_string()) }
+    else { Ok(lrc) }
 }
 
 /// Get the best audio stream URL for a Bilibili video.
@@ -1170,15 +1203,37 @@ fn find_cached_audio(dir: &Path, bvid: &str) -> Option<PathBuf> {
 
 /// Check if yt-dlp is available on the system PATH.
 pub fn is_ytdlp_available() -> bool {
-    let mut cmd = Command::new("yt-dlp");
+    ytdlp_version().is_some()
+}
+
+fn ytdlp_executable() -> Option<PathBuf> {
+    let names = if cfg!(target_os = "windows") {
+        ["yt-dlp.exe", "yt-dlp"]
+    } else {
+        ["yt-dlp", "yt-dlp"]
+    };
     #[cfg(target_os = "windows")]
-    cmd.creation_flags(0x08000000);
-    cmd.arg("--version")
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .output()
-        .map(|o| o.status.success())
-        .unwrap_or(false)
+    let mut candidates = {
+        let mut paths = Vec::new();
+        if let Some(root) = std::env::var_os("APPDATA") {
+            if let Ok(versions) = std::fs::read_dir(PathBuf::from(root).join("Python")) {
+                for version in versions.flatten() {
+                    paths.push(version.path().join("Scripts").join(names[0]));
+                }
+            }
+        }
+        paths
+    };
+    #[cfg(not(target_os = "windows"))]
+    let mut candidates: Vec<PathBuf> = Vec::new();
+    candidates.insert(0, PathBuf::from(names[0]));
+    candidates.into_iter().find(|p| {
+        let mut cmd = Command::new(p);
+        #[cfg(target_os = "windows")]
+        cmd.creation_flags(0x08000000);
+        cmd.arg("--version").stdout(Stdio::null()).stderr(Stdio::null())
+            .output().map(|o| o.status.success()).unwrap_or(false)
+    })
 }
 
 /// The installed yt-dlp version string, if one is available.
@@ -1198,11 +1253,12 @@ fn ytdlp_version() -> Option<String> {
         if v.is_empty() { None } else { Some(v) }
     };
 
-    for py in &["python", "python3"] {
+    for py in &["python", "python3", "py"] {
         let mut cmd = Command::new(py);
         #[cfg(target_os = "windows")]
         cmd.creation_flags(0x08000000);
-        if let Ok(out) = cmd.args(["-m", "yt_dlp", "--version"]).output() {
+        let args: &[&str] = if *py == "py" { &["-3", "-m", "yt_dlp", "--version"] } else { &["-m", "yt_dlp", "--version"] };
+        if let Ok(out) = cmd.args(args).output() {
             if let Some(v) = last_line(&out) {
                 return Some(v);
             }
@@ -1212,7 +1268,30 @@ fn ytdlp_version() -> Option<String> {
     let mut cmd = Command::new("yt-dlp");
     #[cfg(target_os = "windows")]
     cmd.creation_flags(0x08000000);
-    cmd.arg("--version").output().ok().and_then(|o| last_line(&o))
+    if let Ok(out) = cmd.arg("--version").output() {
+        if let Some(v) = last_line(&out) { return Some(v); }
+    }
+    #[cfg(target_os = "windows")]
+    {
+        // GUI apps often inherit a stale PATH. Search the standard Python
+        // user install scripts folders as well as the process PATH.
+        if let Some(root) = std::env::var_os("APPDATA") {
+            let scripts = PathBuf::from(root).join("Python");
+            if let Ok(versions) = std::fs::read_dir(scripts) {
+                for version in versions.flatten() {
+                    let exe = version.path().join("Scripts").join("yt-dlp.exe");
+                    if exe.is_file() {
+                        let mut probe = Command::new(exe);
+                        probe.creation_flags(0x08000000);
+                        if let Ok(out) = probe.arg("--version").output() {
+                            if let Some(v) = last_line(&out) { return Some(v); }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    None
 }
 
 /// Install yt-dlp when missing and upgrade it when outdated.
@@ -1228,6 +1307,7 @@ pub fn ensure_ytdlp_updated() -> Result<String, String> {
     let installers: &[&[&str]] = &[
         &["python", "-m", "pip", "install", "--upgrade", "yt-dlp", "--quiet", "--disable-pip-version-check"],
         &["python3", "-m", "pip", "install", "--upgrade", "yt-dlp", "--quiet", "--disable-pip-version-check"],
+        &["py", "-3", "-m", "pip", "install", "--upgrade", "yt-dlp", "--quiet", "--disable-pip-version-check"],
         &["pip", "install", "--upgrade", "yt-dlp", "--quiet", "--disable-pip-version-check"],
         &["pip3", "install", "--upgrade", "yt-dlp", "--quiet", "--disable-pip-version-check"],
     ];
@@ -1258,8 +1338,8 @@ pub fn ensure_ytdlp_updated() -> Result<String, String> {
 
 /// Find yt-dlp executable — tries yt-dlp first, then python -m yt_dlp, then auto-installs.
 fn find_ytdlp() -> Result<Command, String> {
-    if is_ytdlp_available() {
-        let mut cmd = Command::new("yt-dlp");
+    if let Some(exe) = ytdlp_executable() {
+        let mut cmd = Command::new(exe);
         #[cfg(target_os = "windows")]
         cmd.creation_flags(0x08000000);
         cmd.stderr(std::process::Stdio::piped())
@@ -1267,7 +1347,7 @@ fn find_ytdlp() -> Result<Command, String> {
         return Ok(cmd);
     }
     // Try python -m yt_dlp
-    if let Ok(mut cmd) = try_python_ytdlp() {
+    if let Ok(cmd) = try_python_ytdlp() {
         return Ok(cmd);
     }
 
@@ -1275,6 +1355,7 @@ fn find_ytdlp() -> Result<Command, String> {
     let installers: &[&[&str]] = &[
         &["python", "-m", "pip", "install", "yt-dlp", "--quiet", "--disable-pip-version-check"],
         &["python3", "-m", "pip", "install", "yt-dlp", "--quiet", "--disable-pip-version-check"],
+        &["py", "-3", "-m", "pip", "install", "yt-dlp", "--quiet", "--disable-pip-version-check"],
         &["pip", "install", "yt-dlp", "--quiet", "--disable-pip-version-check"],
         &["pip3", "install", "yt-dlp", "--quiet", "--disable-pip-version-check"],
     ];
@@ -1311,12 +1392,13 @@ fn find_ytdlp() -> Result<Command, String> {
 }
 
 fn try_python_ytdlp() -> Result<Command, String> {
-    for py in &["python", "python3"] {
+    for py in &["python", "python3", "py"] {
         let mut probe = Command::new(py);
         #[cfg(target_os = "windows")]
         probe.creation_flags(0x08000000);
+        let args: &[&str] = if *py == "py" { &["-3", "-m", "yt_dlp", "--version"] } else { &["-m", "yt_dlp", "--version"] };
         let output = probe
-            .args(["-m", "yt_dlp", "--version"])
+            .args(args)
             .output()
             .unwrap_or_else(|_| std::process::Output {
                 status: std::process::ExitStatus::default(),
@@ -1327,13 +1409,23 @@ fn try_python_ytdlp() -> Result<Command, String> {
             let mut cmd = Command::new(py);
             #[cfg(target_os = "windows")]
             cmd.creation_flags(0x08000000);
-            cmd.args(["-m", "yt_dlp"])
+            if *py == "py" { cmd.args(["-3", "-m", "yt_dlp"]); }
+            else { cmd.args(["-m", "yt_dlp"]); }
+            cmd
                 .stderr(std::process::Stdio::piped())
                 .stdout(std::process::Stdio::piped());
             return Ok(cmd);
         }
     }
     Err("python not found".to_string())
+}
+
+/// Save source-provided Bilibili LRC beside a downloaded audio file. Lyrics
+/// are optional on Bilibili, so callers deliberately treat failures as best-effort.
+fn save_bilibili_lyrics(bvid: &str, audio_path: &str) -> Result<(), String> {
+    let lrc = get_bilibili_lyrics(bvid)?;
+    let path = Path::new(audio_path).with_extension("lrc");
+    std::fs::write(path, lrc).map_err(|e| format!("Could not save lyrics: {}", e))
 }
 
 // ─── YouTube Search ───────────────────────────────────
@@ -1607,6 +1699,12 @@ pub fn download_online_audio_unified(
         "youtube" => download_youtube_audio(id_or_url, download_dir, file_name.as_deref()),
         _ => download_online_audio(id_or_url, download_dir, file_name.as_deref()),
     }?;
+
+    if source == "bilibili" {
+        // Not every video has LRC data. Keep audio download successful even
+        // when lyrics are absent or the optional lyrics endpoint is unavailable.
+        let _ = save_bilibili_lyrics(id_or_url, &file_path);
+    }
 
     // Write metadata if provided
     if let (Some(t), Some(a)) = (title, artist) {

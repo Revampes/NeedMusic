@@ -210,7 +210,9 @@ const Heatmap: React.FC<HeatmapProps> = ({ weeks: weeksOverride }) => {
     const monthLbls: { label: string; weekIndex: number }[] = [];
     let lastMonth = -1;
     for (const cell of cellsArr) {
-      const m = new Date(cell.date + "T00:00:00").getMonth();
+      const cellDate = new Date(cell.date + "T00:00:00");
+      if (cellDate.getFullYear() !== year) continue;
+      const m = cellDate.getMonth();
       if (m !== lastMonth) {
         lastMonth = m;
         monthLbls.push({ label: MONTH_NAMES[m], weekIndex: cell.weekIndex });

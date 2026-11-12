@@ -308,10 +308,28 @@ export function useGoogleSync({
       } finally { running = false; }
     };
 
+    // A phone may have been offline or suspended while this window was open.
+    // Reconcile as soon as the app returns to the foreground or connectivity
+    // comes back instead of waiting for the next timer tick.
+    const onResume = () => {
+      if (!cancelled && document.visibilityState === "visible") void run();
+    };
+    const onOnline = () => { if (!cancelled) void run(); };
+    window.addEventListener("focus", onResume);
+    document.addEventListener("visibilitychange", onResume);
+    window.addEventListener("online", onOnline);
+
     // First sync shortly after sign-in.
     const t0 = window.setTimeout(() => { if (!cancelled) void run(); }, 500);
     const id = window.setInterval(() => { if (!cancelled) void run(); }, 20000);
-    return () => { cancelled = true; window.clearTimeout(t0); window.clearInterval(id); };
+    return () => {
+      cancelled = true;
+      window.clearTimeout(t0);
+      window.clearInterval(id);
+      window.removeEventListener("focus", onResume);
+      document.removeEventListener("visibilitychange", onResume);
+      window.removeEventListener("online", onOnline);
+    };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [ready, token, payloadSignature]);
 

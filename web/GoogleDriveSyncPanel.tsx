@@ -130,7 +130,7 @@ const GoogleDriveSyncPanel: React.FC<GoogleSyncPanelProps> = ({
               <option value="none">Never upload audio</option>
             </select>
             <p style={{ fontSize: 12, color: "var(--text-tertiary)", marginTop: 8, lineHeight: 1.5 }}>
-              Metadata, favourites, ratings, progress and playlists always sync. Audio is uploaded only
+              Metadata, favourites, progress and playlists always sync. Audio is uploaded only
               for tracks you mark <strong>Available offline</strong>
               {offlineCount > 0 ? ` (${offlineCount} marked)` : ""}.
             </p>
