@@ -51,6 +51,63 @@ pub struct CombinedSearchResult {
     pub youtube_error: Option<String>,
 }
 
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct TrendingMusicItem {
+    pub bvid: String,
+    pub cid: u64,
+    pub title: String,
+    pub owner_name: String,
+    pub pic: String,
+    pub duration: f64,
+    pub view: u64,
+}
+
+/// Fetch only stable metadata for the Bilibili music ranking.
+pub fn fetch_trending_music() -> Result<Vec<TrendingMusicItem>, String> {
+    ensure_bili_warmed();
+    let url = "https://api.bilibili.com/x/web-interface/ranking/v2?rid=3&type=all";
+    let json = fetch_json_with_retry(url, "music ranking")?;
+    let code = json["code"].as_i64().unwrap_or(-1);
+    if code != 0 {
+        return Err(format!(
+            "Bilibili ranking API error ({}): {}",
+            code,
+            json["message"].as_str().unwrap_or("Unknown error")
+        ));
+    }
+
+    let items = json["data"]["list"]
+        .as_array()
+        .ok_or("Bilibili ranking response had no list")?;
+    Ok(items
+        .iter()
+        .filter_map(|item| {
+            let bvid = item["bvid"].as_str()?.to_string();
+            let cid = item["cid"].as_u64()?;
+            if bvid.is_empty() || cid == 0 {
+                return None;
+            }
+            let pic = item["pic"].as_str().unwrap_or("").to_string();
+            Some(TrendingMusicItem {
+                bvid,
+                cid,
+                title: html_unescape(item["title"].as_str().unwrap_or("Unknown")),
+                owner_name: item["owner"]["name"]
+                    .as_str()
+                    .unwrap_or("Unknown Artist")
+                    .to_string(),
+                pic: if pic.starts_with("//") {
+                    format!("https:{}", pic)
+                } else {
+                    pic.replace("http://", "https://")
+                },
+                duration: item["duration"].as_f64().unwrap_or(0.0),
+                view: item["stat"]["view"].as_u64().unwrap_or(0),
+            })
+        })
+        .collect())
+}
+
 /// Search both Bilibili and YouTube in parallel, tolerating per-source
 /// failures so the first search (e.g. cold Wbi keys / yt-dlp auto-install)
 /// never fails the whole request.
@@ -751,8 +808,8 @@ fn get_bilibili_lyrics_inner(bvid: &str, attempt: u8) -> Result<String, String> 
 }
 
 /// Get the best audio stream URL for a Bilibili video.
-fn get_audio_url(bvid: &str) -> Result<String, String> {
-    let cid = get_cid(bvid)?;
+fn get_audio_url(bvid: &str, cached_cid: Option<u64>) -> Result<String, String> {
+    let cid = cached_cid.unwrap_or(get_cid(bvid)?);
 
     // Get the play URL with DASH format (fnval=16 → separate audio/video streams).
     let play_url = make_signed_url(
@@ -772,7 +829,7 @@ fn get_audio_url(bvid: &str) -> Result<String, String> {
     if code == -799 {
         let mut cache = WBI_CACHE.lock().unwrap();
         *cache = None;
-        return get_audio_url(bvid);
+        return get_audio_url(bvid, None);
     }
     if code != 0 {
         let msg = json["message"].as_str().unwrap_or("Unknown error");
@@ -1099,6 +1156,7 @@ pub fn convert_saved_audio_to_mp3(dir: &str) -> Result<ConvertFolderResult, Stri
 /// Returns the path to the downloaded file.
 pub fn download_online_audio(
     bvid: &str,
+    cid: Option<u64>,
     download_dir: Option<&str>,
     file_name: Option<&str>,
 ) -> Result<String, String> {
@@ -1109,16 +1167,34 @@ pub fn download_online_audio(
     std::fs::create_dir_all(&out_dir)
         .map_err(|e| format!("Cannot create dir: {}", e))?;
 
-    // Check cache first (by bvid prefix).
+    // Check the requested destination first, then reuse the temporary playback
+    // cache when materializing a downloaded library file.
     if let Some(cached) = find_cached_audio(&out_dir, bvid) {
         return Ok(cached.to_string_lossy().to_string());
+    }
+    let temp_dir = std::env::temp_dir().join("needmusic_online");
+    if download_dir.is_some() {
+        if let Some(cached) = find_cached_audio(&temp_dir, bvid) {
+            let name = if download_dir.is_none() {
+                sanitize_filename(bvid)
+            } else {
+                file_name
+                    .map(|n| sanitize_filename(n))
+                    .unwrap_or_else(|| sanitize_filename(bvid))
+            };
+            let ext = cached.extension().and_then(|e| e.to_str()).unwrap_or("m4a");
+            let target = out_dir.join(format!("{}.{}", name, ext));
+            std::fs::copy(&cached, &target)
+                .map_err(|e| format!("Cannot copy cached audio: {}", e))?;
+            return Ok(ensure_mp3(target).to_string_lossy().to_string());
+        }
     }
 
     // Get the audio stream URL.
     // `get_cid` (used here) resolves via `player/pagelist`, which still answers
     // when Bilibili's risk control bans the `x/web-interface/view` endpoint
     // with `-412 "request was banned"` on the current network.
-    let audio_url = get_audio_url(bvid)?;
+    let audio_url = get_audio_url(bvid, cid)?;
 
     // Determine file extension from the URL or default to m4a.
     let ext = if audio_url.contains(".m4a") || audio_url.contains("mp4a") {
@@ -1690,6 +1766,7 @@ fn find_downloaded_file(dir: &Path) -> Option<PathBuf> {
 pub fn download_online_audio_unified(
     source: &str,
     id_or_url: &str,
+    cid: Option<u64>,
     download_dir: Option<&str>,
     title: Option<&str>,
     artist: Option<&str>,
@@ -1697,7 +1774,7 @@ pub fn download_online_audio_unified(
     let file_name = title.map(|t| sanitize_filename(t));
     let file_path = match source {
         "youtube" => download_youtube_audio(id_or_url, download_dir, file_name.as_deref()),
-        _ => download_online_audio(id_or_url, download_dir, file_name.as_deref()),
+        _ => download_online_audio(id_or_url, cid, download_dir, file_name.as_deref()),
     }?;
 
     if source == "bilibili" {
@@ -1831,7 +1908,7 @@ mod tests {
         let cid = get_cid(&bvid).expect("video info (get_cid) must not 412");
         assert!(cid > 0, "cid must be non-zero");
 
-        let url = get_audio_url(&bvid).expect("playurl must resolve an audio URL");
+        let url = get_audio_url(&bvid, Some(cid)).expect("playurl must resolve an audio URL");
         assert!(url.starts_with("http"), "audio URL should be absolute: {}", url);
         println!("cid = {}, audio url = {}", cid, url);
 

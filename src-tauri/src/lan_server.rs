@@ -391,6 +391,7 @@ fn handle_connection(
             &source,
             &id,
             None,
+            None,
             if title.is_empty() { None } else { Some(&title) },
             if artist.is_empty() { None } else { Some(&artist) },
         ) {
@@ -486,11 +487,11 @@ fn playlists_payload(
 /// temp cache, exactly like the desktop player does.
 fn resolve_track_path(track: &LanTrack) -> Result<std::path::PathBuf, String> {
     if let Some(bvid) = track.file_path.strip_prefix("bilibili://") {
-        return online::download_online_audio_unified("bilibili", bvid, None, None, None)
+        return online::download_online_audio_unified("bilibili", bvid, None, None, None, None)
             .map(std::path::PathBuf::from);
     }
     if let Some(url) = track.file_path.strip_prefix("youtube://") {
-        return online::download_online_audio_unified("youtube", url, None, None, None)
+        return online::download_online_audio_unified("youtube", url, None, None, None, None)
             .map(std::path::PathBuf::from);
     }
     Ok(std::path::PathBuf::from(&track.file_path))

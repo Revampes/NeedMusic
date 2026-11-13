@@ -1423,6 +1423,14 @@ html.glass-opacity-100 { --glass-bg-opacity: 0.88; }
   grid-template-columns: 1fr 1fr;
   gap: var(--space-4);
 }
+.home-section-heading{display:flex;align-items:center;justify-content:space-between;margin-bottom:var(--space-2)}
+.home-trending-section{grid-column:1 / -1;flex-shrink:0;min-height:180px}
+.home-trending-list{display:flex;flex-direction:column;gap:var(--space-1)}
+.home-trending-row{display:flex;align-items:center;gap:var(--space-2);padding:8px;border-radius:var(--radius-md);background:var(--btn-hover-bg)}
+.home-trending-row .hmt-play{opacity:1}
+.trending-download-button{display:flex;align-items:center;gap:5px;padding:6px 10px;border:1px solid var(--glass-border-strong);border-radius:var(--radius-md);background:var(--btn-hover-bg);color:var(--text-secondary);font-size:var(--text-xs);font-weight:var(--weight-semibold);cursor:pointer;flex-shrink:0}
+.trending-download-button:hover:not(:disabled){background:var(--accent-primary);border-color:var(--accent-primary);color:#fff}
+.trending-download-button:disabled{opacity:.6;cursor:wait}
 
 /* ── Section ───────────────────────── */
 .home-section {

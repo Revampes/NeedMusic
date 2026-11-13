@@ -1,10 +1,14 @@
-import React, { useMemo } from "react";
+import React, { useCallback, useEffect, useMemo, useState } from "react";
+import { invoke } from "@tauri-apps/api/core";
 import type { Track } from "@core/models/Track";
+import { OnlineMusicService, TrendingMusicItem } from "@core/services/OnlineMusicService";
+import { DatabaseManager } from "@core/services/DatabaseManager";
+import { PlaybackEngine } from "@core/services/PlaybackEngine";
 import { Album } from "@core/models/Album";
 import { Artist } from "@core/models/Artist";
 import {
   IconMusic, IconDisc, IconMic, IconPlaylist,
-  IconPlay, IconHeart, IconHeartFill,
+  IconPlay, IconHeart, IconHeartFill, IconDownload,
 } from "@ui/components/Icons";
 import Heatmap from "@ui/components/Heatmap";
 
@@ -12,6 +16,7 @@ interface HomeViewProps {
   tracks: Track[];
   currentTrack: Track | null;
   onPlay: (track: Track) => void;
+  onTrackSaved: () => void;
 }
 
 function formatDuration(secs: number): string {
@@ -28,8 +33,68 @@ function getGreeting(): string {
   return "Good Night";
 }
 
-const HomeView: React.FC<HomeViewProps> = ({ tracks, currentTrack, onPlay }) => {
+const HomeView: React.FC<HomeViewProps> = ({ tracks, currentTrack, onPlay, onTrackSaved }) => {
   const greeting = getGreeting();
+  const [trending, setTrending] = useState<TrendingMusicItem[]>([]);
+  const [trendingLoading, setTrendingLoading] = useState(true);
+  const [trendingError, setTrendingError] = useState<string | null>(null);
+  const [trendingBusy, setTrendingBusy] = useState<string | null>(null);
+  const onlineService = OnlineMusicService.getInstance();
+  const engine = PlaybackEngine.getInstance();
+
+  const loadTrending = useCallback(async (refresh = false) => {
+    setTrendingLoading(true);
+    setTrendingError(null);
+    try {
+      setTrending(await onlineService.fetchTrendingMusic(refresh));
+    } catch (error) {
+      setTrendingError(String(error));
+    } finally {
+      setTrendingLoading(false);
+    }
+  }, [onlineService]);
+
+  useEffect(() => { void loadTrending(); }, [loadTrending]);
+
+  const asOnlineItem = (item: TrendingMusicItem) => ({
+    source: "bilibili",
+    id: item.bvid,
+    bvid: item.bvid,
+    cid: item.cid,
+    title: item.title,
+    author: item.owner_name,
+    duration: formatDuration(item.duration),
+    duration_secs: item.duration,
+    cover_url: item.pic,
+    description: "",
+    url: `https://www.bilibili.com/video/${item.bvid}`,
+  });
+
+  const playTrending = async (item: TrendingMusicItem) => {
+    setTrendingBusy(item.bvid);
+    try {
+      await engine.play(await onlineService.downloadAndPlay(asOnlineItem(item)));
+    } catch (error) {
+      setTrendingError(String(error));
+    } finally {
+      setTrendingBusy(null);
+    }
+  };
+
+  const downloadTrending = async (item: TrendingMusicItem) => {
+    setTrendingBusy(item.bvid);
+    try {
+      const db = DatabaseManager.getInstance();
+      let directory = await db.getSetting("onlineDownloadPath");
+      if (!directory) directory = await invoke<string>("get_default_download_dir");
+      await onlineService.saveToLibrary(asOnlineItem(item), directory);
+      onTrackSaved();
+    } catch (error) {
+      setTrendingError(String(error));
+    } finally {
+      setTrendingBusy(null);
+    }
+  };
 
   // Compute stats
   const stats = useMemo(() => {
@@ -97,6 +162,43 @@ const HomeView: React.FC<HomeViewProps> = ({ tracks, currentTrack, onPlay }) => 
 
       {/* ── Listening Heatmap ──────────────────────── */}
       <Heatmap />
+
+      <section className="home-section home-trending-section">
+        <div className="home-section-heading">
+          <h3 className="home-section-title">Trending on Bilibili</h3>
+          <button className="home-action-btn secondary" onClick={() => void loadTrending(true)} disabled={trendingLoading}>
+            Refresh
+          </button>
+        </div>
+        {trendingLoading ? (
+          <div className="home-empty-msg">Loading trending music...</div>
+        ) : trendingError ? (
+          <div className="home-empty-msg">{trendingError}</div>
+        ) : trending.length === 0 ? (
+          <div className="home-empty-msg">
+            No trending tracks were returned. Use Refresh to try again.
+          </div>
+        ) : (
+          <div className="home-trending-list">
+            {trending.slice(0, 10).map((item) => (
+              <div key={item.bvid} className="home-trending-row">
+                <div className="hmt-info">
+                  <div className="hmt-title">{item.title}</div>
+                  <div className="hmt-artist">{item.owner_name} · {item.view.toLocaleString()} views</div>
+                </div>
+                <div className="hmt-dur">{formatDuration(item.duration)}</div>
+                <button className="hmt-play trending-play-button" title="Play" disabled={trendingBusy === item.bvid} onClick={() => void playTrending(item)}>
+                  <IconPlay size={14} />
+                </button>
+                <button className="trending-download-button" title="Download audio to your music library" disabled={trendingBusy === item.bvid} onClick={() => void downloadTrending(item)}>
+                  <IconDownload size={14} />
+                  <span>Download</span>
+                </button>
+              </div>
+            ))}
+          </div>
+        )}
+      </section>
 
       {/* ── Content Grid ────────────────────────────── */}
       <div className="home-content-grid">

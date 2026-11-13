@@ -851,7 +851,7 @@ const App: React.FC = () => {
             </div>
           )}
           <div className="content-area">
-            {activeTab === "Home" ? <HomeView tracks={tracks} currentTrack={ct as Track | null} onPlay={handlePlayTrack} /> :
+            {activeTab === "Home" ? <HomeView tracks={tracks} currentTrack={ct as Track | null} onPlay={handlePlayTrack} onTrackSaved={() => setTracks(LibraryManager.getInstance().getAllTracks())} /> :
              activeTab === "Albums" ? <AlbumsView tracks={filteredTracks} onPlay={handlePlayTrack} /> :
              activeTab === "Artists" ? <ArtistsView tracks={filteredTracks} /> :
              activeTab === "Playlists" ? <PlaylistsView tracks={tracks} onChanged={() => setPlaylistVersion((v) => v + 1)} /> :

@@ -94,6 +94,7 @@ export class NativeAudioPlayer implements IAudioOutput {
     const cachedPath = await invoke<string>("download_online_audio", {
       source,
       idOrUrl,
+      cid: null,
       downloadDir: null,
       title: null,
       artist: null,

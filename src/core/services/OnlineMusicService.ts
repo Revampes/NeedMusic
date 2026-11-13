@@ -1,6 +1,7 @@
 import { invoke } from "@tauri-apps/api/core";
 import { Track } from "@core/models/Track";
 import { LibraryManager } from "./LibraryManager";
+import { DatabaseManager } from "./DatabaseManager";
 
 /**
  * Raw search result from the Rust backend (used for both Bilibili & YouTube).
@@ -16,6 +17,17 @@ export interface OnlineSearchItem {
   cover_url: string;
   description: string;
   url: string;            // Full URL (YouTube needs this)
+  cid?: number;           // Cached Bilibili page id, when available
+}
+
+export interface TrendingMusicItem {
+  bvid: string;
+  cid: number;
+  title: string;
+  owner_name: string;
+  pic: string;
+  duration: number;
+  view: number;
 }
 
 export interface OnlineSearchResult {
@@ -42,12 +54,47 @@ export interface CombinedSearchResult {
  */
 export class OnlineMusicService {
   private static instance: OnlineMusicService | null = null;
+  private trendingFetchPromise: Promise<TrendingMusicItem[]> | null = null;
 
   static getInstance(): OnlineMusicService {
     if (!OnlineMusicService.instance) {
       OnlineMusicService.instance = new OnlineMusicService();
     }
     return OnlineMusicService.instance;
+  }
+
+  private static readonly TRENDING_CACHE_KEY = "bilibiliTrendingMusic";
+  private static readonly TRENDING_TTL_MS = 8 * 60 * 60 * 1000;
+
+  /** Return cached ranking metadata, fetching it only when expired or forced. */
+  async fetchTrendingMusic(forceRefresh = false): Promise<TrendingMusicItem[]> {
+    const db = DatabaseManager.getInstance();
+    const cached = await db.getSetting(OnlineMusicService.TRENDING_CACHE_KEY);
+    if (!forceRefresh && cached) {
+      try {
+        const parsed = JSON.parse(cached) as { fetchedAt: number; items: TrendingMusicItem[] };
+        if (Date.now() - parsed.fetchedAt < OnlineMusicService.TRENDING_TTL_MS) {
+          return parsed.items;
+        }
+      } catch {
+        // Corrupt cache is treated as expired and replaced by a fresh response.
+      }
+    }
+
+    if (this.trendingFetchPromise) return this.trendingFetchPromise;
+    this.trendingFetchPromise = (async () => {
+      const items = await invoke<TrendingMusicItem[]>("fetch_trending_music");
+      await db.setSetting(
+        OnlineMusicService.TRENDING_CACHE_KEY,
+        JSON.stringify({ fetchedAt: Date.now(), items }),
+      );
+      return items;
+    })();
+    try {
+      return await this.trendingFetchPromise;
+    } finally {
+      this.trendingFetchPromise = null;
+    }
   }
 
   /** Search Bilibili only. */
@@ -73,6 +120,7 @@ export class OnlineMusicService {
     const filePath = await invoke<string>("download_online_audio", {
       source: item.source,
       idOrUrl: item.source === "youtube" ? item.url : item.bvid,
+      cid: item.cid ?? null,
       downloadDir: null,
       title: item.title,
       artist: item.author,
@@ -92,6 +140,7 @@ export class OnlineMusicService {
     const filePath = await invoke<string>("download_online_audio", {
       source: item.source,
       idOrUrl: item.source === "youtube" ? item.url : item.bvid,
+      cid: item.cid ?? null,
       downloadDir: musicFolder,
       title: item.title,
       artist: item.author,

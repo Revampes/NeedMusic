@@ -750,6 +750,7 @@ async fn search_combined(query: String) -> Result<CombinedSearchResult, String> 
 async fn download_online_audio(
     source: String,
     id_or_url: String,
+    cid: Option<u64>,
     download_dir: Option<String>,
     title: Option<String>,
     artist: Option<String>,
@@ -759,11 +760,19 @@ async fn download_online_audio(
     let d = download_dir.clone();
     let t = title.clone();
     let a = artist.clone();
+    let c = cid;
     tokio::task::spawn_blocking(move || {
-        online::download_online_audio_unified(&s, &i, d.as_deref(), t.as_deref(), a.as_deref())
+        online::download_online_audio_unified(&s, &i, c, d.as_deref(), t.as_deref(), a.as_deref())
     })
     .await
     .map_err(|e| format!("Download task panicked: {}", e))?
+}
+
+#[tauri::command]
+async fn fetch_trending_music() -> Result<Vec<online::TrendingMusicItem>, String> {
+    tokio::task::spawn_blocking(online::fetch_trending_music)
+        .await
+        .map_err(|e| format!("Trending task panicked: {}", e))?
 }
 
 #[tauri::command]
@@ -1236,6 +1245,7 @@ pub fn run() {
             search_bilibili,
             search_youtube,
             search_combined,
+            fetch_trending_music,
             get_online_lyrics,
             download_online_audio,
             get_default_download_dir,
