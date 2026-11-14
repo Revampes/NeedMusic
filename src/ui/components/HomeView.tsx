@@ -39,6 +39,9 @@ const HomeView: React.FC<HomeViewProps> = ({ tracks, currentTrack, onPlay, onTra
   const [trendingLoading, setTrendingLoading] = useState(true);
   const [trendingError, setTrendingError] = useState<string | null>(null);
   const [trendingBusy, setTrendingBusy] = useState<string | null>(null);
+  const [recommended, setRecommended] = useState<TrendingMusicItem[]>([]);
+  const [recommendedLoading, setRecommendedLoading] = useState(true);
+  const [recommendedError, setRecommendedError] = useState<string | null>(null);
   const onlineService = OnlineMusicService.getInstance();
   const engine = PlaybackEngine.getInstance();
 
@@ -55,6 +58,20 @@ const HomeView: React.FC<HomeViewProps> = ({ tracks, currentTrack, onPlay, onTra
   }, [onlineService]);
 
   useEffect(() => { void loadTrending(); }, [loadTrending]);
+
+  const loadRecommended = useCallback(async () => {
+    setRecommendedLoading(true);
+    setRecommendedError(null);
+    try {
+      setRecommended(await onlineService.fetchRecommendedMusic());
+    } catch (error) {
+      setRecommendedError(String(error));
+    } finally {
+      setRecommendedLoading(false);
+    }
+  }, [onlineService]);
+
+  useEffect(() => { void loadRecommended(); }, [loadRecommended]);
 
   const asOnlineItem = (item: TrendingMusicItem) => ({
     source: "bilibili",
@@ -163,7 +180,42 @@ const HomeView: React.FC<HomeViewProps> = ({ tracks, currentTrack, onPlay, onTra
       {/* ── Listening Heatmap ──────────────────────── */}
       <Heatmap />
 
-      <section className="home-section home-trending-section">
+      <div className="home-discovery-grid">
+      <section className="home-section home-discovery-section">
+        <div className="home-section-heading">
+          <h3 className="home-section-title">Recommended for You</h3>
+        </div>
+        {recommendedLoading ? (
+          <div className="home-empty-msg">Building recommendations...</div>
+        ) : recommendedError ? (
+          <div className="home-empty-msg">{recommendedError}</div>
+        ) : recommended.length === 0 ? (
+          <div className="home-empty-msg">
+            Play a few Bilibili tracks to get personalized recommendations.
+          </div>
+        ) : (
+          <div className="home-trending-list">
+            {recommended.slice(0, 20).map((item) => (
+              <div key={item.bvid} className="home-trending-row">
+                <div className="hmt-info">
+                  <div className="hmt-title">{item.title}</div>
+                  <div className="hmt-artist">{item.owner_name} · {item.view.toLocaleString()} views</div>
+                </div>
+                <div className="hmt-dur">{formatDuration(item.duration)}</div>
+                <button className="hmt-play trending-play-button" title="Play" disabled={trendingBusy === item.bvid} onClick={() => void playTrending(item)}>
+                  <IconPlay size={14} />
+                </button>
+                <button className="trending-download-button" title="Download audio to your music library" disabled={trendingBusy === item.bvid} onClick={() => void downloadTrending(item)}>
+                  <IconDownload size={14} />
+                  <span>Download</span>
+                </button>
+              </div>
+            ))}
+          </div>
+        )}
+      </section>
+
+      <section className="home-section home-discovery-section">
         <div className="home-section-heading">
           <h3 className="home-section-title">Trending on Bilibili</h3>
           <button className="home-action-btn secondary" onClick={() => void loadTrending(true)} disabled={trendingLoading}>
@@ -199,6 +251,7 @@ const HomeView: React.FC<HomeViewProps> = ({ tracks, currentTrack, onPlay, onTra
           </div>
         )}
       </section>
+      </div>
 
       {/* ── Content Grid ────────────────────────────── */}
       <div className="home-content-grid">

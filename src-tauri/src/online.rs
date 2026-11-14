@@ -8,6 +8,7 @@
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::{Arc, Mutex};
+use std::collections::HashSet;
 
 #[cfg(target_os = "windows")]
 use std::os::windows::process::CommandExt;
@@ -106,6 +107,105 @@ pub fn fetch_trending_music() -> Result<Vec<TrendingMusicItem>, String> {
             })
         })
         .collect())
+}
+
+const MUSIC_TIDS: [u64; 12] = [3, 28, 29, 30, 31, 59, 130, 193, 194, 243, 244, 245];
+
+/// Fetch and normalize related music metadata for recommendation seeds.
+/// No playback URLs or audio bytes are requested here.
+pub fn fetch_related_music(
+    seed_bvids: &[String],
+    excluded_bvids: &[String],
+) -> Result<Vec<TrendingMusicItem>, String> {
+    ensure_bili_warmed();
+    let excluded: HashSet<String> = excluded_bvids.iter().cloned().collect();
+    let mut seen = excluded.clone();
+    let mut results = Vec::new();
+    let mut last_error: Option<String> = None;
+
+    for seed in seed_bvids.iter().take(3) {
+        let url = format!(
+            "https://api.bilibili.com/x/web-interface/archive/related?bvid={}",
+            url_encode(seed)
+        );
+        let json = match fetch_json_with_retry(&url, "related music") {
+            Ok(value) => value,
+            Err(error) => {
+                last_error = Some(error);
+                continue;
+            }
+        };
+        if json["code"].as_i64().unwrap_or(-1) != 0 {
+            last_error = Some(format!(
+                "Bilibili related API error ({}): {}",
+                json["code"].as_i64().unwrap_or(-1),
+                json["message"].as_str().unwrap_or("Unknown error")
+            ));
+            continue;
+        }
+
+        let Some(items) = json["data"].as_array() else {
+            continue;
+        };
+        for item in items {
+            let Some(bvid) = item["bvid"].as_str() else { continue };
+            let cid = item["cid"].as_u64().unwrap_or(0);
+            let tid = item["tid"].as_u64().unwrap_or(0);
+            let duration = item["duration"]
+                .as_f64()
+                .or_else(|| item["duration"].as_str().map(parse_duration))
+                .unwrap_or(0.0);
+            if bvid.is_empty()
+                || cid == 0
+                || !MUSIC_TIDS.contains(&tid)
+                || duration <= 0.0
+                || duration > 30.0 * 60.0
+                || seen.contains(bvid)
+            {
+                continue;
+            }
+
+            seen.insert(bvid.to_string());
+            let pic = item["pic"].as_str().unwrap_or("").to_string();
+            results.push(TrendingMusicItem {
+                bvid: bvid.to_string(),
+                cid,
+                title: html_unescape(item["title"].as_str().unwrap_or("Unknown")),
+                owner_name: item["owner"]["name"]
+                    .as_str()
+                    .unwrap_or("Unknown Artist")
+                    .to_string(),
+                pic: if pic.starts_with("//") {
+                    format!("https:{}", pic)
+                } else {
+                    pic.replace("http://", "https://")
+                },
+                duration,
+                view: item["stat"]["view"].as_u64().unwrap_or(0),
+            });
+        }
+    }
+
+    // Shuffle without adding a dependency; the seed only affects presentation.
+    let mut state = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|value| value.as_nanos() as u64)
+        .unwrap_or(1);
+    for index in (1..results.len()).rev() {
+        state ^= state << 13;
+        state ^= state >> 7;
+        state ^= state << 17;
+        let swap_index = (state as usize) % (index + 1);
+        results.swap(index, swap_index);
+    }
+    results.truncate(30);
+
+    if results.is_empty() {
+        if let Some(error) = last_error {
+            return Err(error);
+        }
+    }
+    Ok(results)
 }
 
 /// Search both Bilibili and YouTube in parallel, tolerating per-source

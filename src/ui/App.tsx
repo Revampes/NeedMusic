@@ -166,6 +166,20 @@ const App: React.FC = () => {
   // Publish the Drive handle for the player callbacks below.
   driveSyncRef.current = driveSync;
 
+  const recordTrackActivity = useCallback((track: Track | ITrack | null) => {
+    const db = DatabaseManager.getInstance();
+    const bvid = (track as Track | null)?.onlineBvid ||
+      (track?.filePath.startsWith(Track.ONLINE_BILIBILI_PREFIX)
+        ? track.filePath.slice(Track.ONLINE_BILIBILI_PREFIX.length)
+        : null);
+    return Promise.all([
+      db.recordPlay(),
+      bvid ? db.recordOnlinePlay(bvid) : Promise.resolve(),
+    ]).then(() => {
+      window.dispatchEvent(new CustomEvent("listeningActivity"));
+    });
+  }, []);
+
   /**
    * Persist the seconds listened since the last flush. Only whole seconds are
    * written (the fractional remainder stays in `pending`), so repeated calls
@@ -319,10 +333,7 @@ const App: React.FC = () => {
               if (trackChangeVersionRef.current !== observedTrackChange) return;
               const current = engine.currentTrack;
               if (!current) return;
-              DatabaseManager.getInstance().recordPlay()
-                .then(() => {
-                  window.dispatchEvent(new CustomEvent("listeningActivity"));
-                })
+              recordTrackActivity(current)
                 .catch(() => {});
             });
           }
@@ -337,8 +348,7 @@ const App: React.FC = () => {
           listenRef.current.lastPos = 0;
           currentTrackRef.current = (t as Track) ?? null;
           if (t) {
-            DatabaseManager.getInstance().recordPlay()
-              .then(() => window.dispatchEvent(new CustomEvent("listeningActivity")))
+            recordTrackActivity(t as Track)
               .catch(() => {});
             // Resume where this song was last left (synced from any device).
             const resumeSecs = Number((t as Track).resumePositionSecs) || 0;

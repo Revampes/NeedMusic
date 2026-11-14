@@ -776,6 +776,18 @@ async fn fetch_trending_music() -> Result<Vec<online::TrendingMusicItem>, String
 }
 
 #[tauri::command]
+async fn fetch_related_music(
+    seed_bvids: Vec<String>,
+    excluded_bvids: Vec<String>,
+) -> Result<Vec<online::TrendingMusicItem>, String> {
+    tokio::task::spawn_blocking(move || {
+        online::fetch_related_music(&seed_bvids, &excluded_bvids)
+    })
+    .await
+    .map_err(|e| format!("Related music task panicked: {}", e))?
+}
+
+#[tauri::command]
 async fn is_ytdlp_available() -> Result<bool, String> {
     Ok(online::is_ytdlp_available())
 }
@@ -1246,6 +1258,7 @@ pub fn run() {
             search_youtube,
             search_combined,
             fetch_trending_music,
+            fetch_related_music,
             get_online_lyrics,
             download_online_audio,
             get_default_download_dir,

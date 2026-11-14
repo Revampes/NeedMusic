@@ -413,6 +413,9 @@ body.nm-dragging .queue-panel-item { cursor: copy; }
 /* Hairline divider *between* rows (never a trailing line under the last one)
    so the eye can track a row across the title/artist/album columns. */
 .track-row + .track-row{border-top:1px solid var(--glass-border)}
+.track-list > .track-row{background:var(--btn-hover-bg);border:1px solid var(--glass-border);border-radius:var(--radius-md);margin:0 var(--space-2) var(--space-2);box-shadow:0 1px 2px rgba(0,0,0,.12)}
+.track-list > .track-row + .track-row{border-top:1px solid var(--glass-border)}
+.track-list > .track-row:hover{background:var(--row-hover-bg);border-color:var(--glass-border-strong)}
 .track-row[draggable="true"]{-webkit-user-select:none;user-select:none;-webkit-user-drag:element}
 .track-row::before{content:'';position:absolute;left:0;top:2px;bottom:2px;width:var(--row-active-strip-width);background:transparent;border-radius:0 var(--radius-sm) var(--radius-sm) 0;transition:background var(--transition-fast)}
 .track-row:hover{background:var(--row-hover-bg)}
@@ -1423,6 +1426,8 @@ html.glass-opacity-100 { --glass-bg-opacity: 0.88; }
   grid-template-columns: 1fr 1fr;
   gap: var(--space-4);
 }
+.home-discovery-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:var(--space-4);align-items:start}
+.home-discovery-section{min-width:0;min-height:180px}
 .home-section-heading{display:flex;align-items:center;justify-content:space-between;margin-bottom:var(--space-2)}
 .home-trending-section{grid-column:1 / -1;flex-shrink:0;min-height:180px}
 .home-trending-list{display:flex;flex-direction:column;gap:var(--space-1)}

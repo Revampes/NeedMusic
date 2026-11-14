@@ -11,6 +11,8 @@ import {
 export class Track implements ITrack {
   public readonly id: TrackId;
   public readonly filePath: string;
+  /** Stable Bilibili id for downloaded online tracks, when known. */
+  public readonly onlineBvid: string | null;
   public title: string;
   public readonly artist: string;
   public readonly album: string;
@@ -31,6 +33,7 @@ export class Track implements ITrack {
 
   constructor(params: {
     filePath: string;
+    onlineBvid?: string | null;
     title: string;
     artist: string;
     album: string;
@@ -50,6 +53,7 @@ export class Track implements ITrack {
   }) {
     this.id = Track.generateId(params.filePath);
     this.filePath = params.filePath;
+    this.onlineBvid = params.onlineBvid ?? null;
     this.title = params.title || "Unknown";
     this.artist = params.artist || "Unknown Artist";
     this.album = params.album || "Unknown Album";
@@ -112,9 +116,11 @@ export class Track implements ITrack {
     rating?: number | string | null;
     resume_position_secs?: number | string | null;
     date_added?: string | null;
+    online_bvid?: string | null;
   }): Track {
     return new Track({
       filePath: raw.file_path,
+      onlineBvid: raw.online_bvid,
       title: raw.title,
       artist: raw.artist,
       album: raw.album,

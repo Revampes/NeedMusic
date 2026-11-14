@@ -65,6 +65,9 @@ export class OnlineMusicService {
 
   private static readonly TRENDING_CACHE_KEY = "bilibiliTrendingMusic";
   private static readonly TRENDING_TTL_MS = 8 * 60 * 60 * 1000;
+  private static readonly RECOMMENDED_CACHE_KEY = "bilibiliRecommendedMusic";
+  private static readonly RECOMMENDED_TTL_MS = 18 * 60 * 60 * 1000;
+  private recommendedFetchPromise: Promise<TrendingMusicItem[]> | null = null;
 
   /** Return cached ranking metadata, fetching it only when expired or forced. */
   async fetchTrendingMusic(forceRefresh = false): Promise<TrendingMusicItem[]> {
@@ -77,7 +80,7 @@ export class OnlineMusicService {
           return parsed.items;
         }
       } catch {
-        // Corrupt cache is treated as expired and replaced by a fresh response.
+        // Corrupt cache is treated as expired.
       }
     }
 
@@ -94,6 +97,111 @@ export class OnlineMusicService {
       return await this.trendingFetchPromise;
     } finally {
       this.trendingFetchPromise = null;
+    }
+  }
+
+  /** Read the existing trending cache without causing a network request. */
+  async getCachedTrendingMusic(): Promise<TrendingMusicItem[]> {
+    const cached = await DatabaseManager.getInstance().getSetting(
+      OnlineMusicService.TRENDING_CACHE_KEY,
+    );
+    if (!cached) return [];
+    try {
+      const parsed = JSON.parse(cached) as {
+        fetchedAt: number;
+        items: TrendingMusicItem[];
+      };
+      return Date.now() - parsed.fetchedAt < OnlineMusicService.TRENDING_TTL_MS
+        ? parsed.items
+        : [];
+    } catch {
+      return [];
+    }
+  }
+
+  /**
+   * Build personalized Bilibili recommendations from local listening seeds.
+   * Related-video metadata is cached; playback URLs are deliberately not.
+   */
+  async fetchRecommendedMusic(): Promise<TrendingMusicItem[]> {
+    const db = DatabaseManager.getInstance();
+    const cached = await db.getSetting(OnlineMusicService.RECOMMENDED_CACHE_KEY);
+    if (cached) {
+      try {
+        const parsed = JSON.parse(cached) as {
+          fetchedAt: number;
+          items: TrendingMusicItem[];
+        };
+        if (Date.now() - parsed.fetchedAt < OnlineMusicService.RECOMMENDED_TTL_MS) {
+          return parsed.items;
+        }
+      } catch {
+        // Replace malformed cache below.
+      }
+    }
+    if (this.recommendedFetchPromise) return this.recommendedFetchPromise;
+
+    this.recommendedFetchPromise = (async () => {
+      const history = await db.getOnlineListeningHistory();
+      const savedBvids = new Set([
+        ...(await db.getOnlineLibrarySources()),
+        ...LibraryManager.getInstance()
+          .getAllTracks()
+          .map((track) =>
+            track.onlineBvid ||
+            (track.filePath.startsWith(Track.ONLINE_BILIBILI_PREFIX)
+              ? track.filePath.slice(Track.ONLINE_BILIBILI_PREFIX.length)
+              : null),
+          )
+          .filter((bvid): bvid is string => Boolean(bvid)),
+      ]);
+      const recentCutoff = Date.now() - 7 * 24 * 60 * 60 * 1000;
+      const recentBvids = new Set(
+        history
+          .filter((entry) => {
+            const timestamp = Date.parse(`${entry.lastPlayed.replace(" ", "T")}Z`);
+            return Number.isFinite(timestamp) && timestamp >= recentCutoff;
+          })
+          .map((entry) => entry.bvid),
+      );
+      const favoriteBvids = LibraryManager.getInstance()
+        .getAllTracks()
+        .filter((track) => track.isFavorite)
+        .map((track) =>
+          track.onlineBvid ||
+          (track.filePath.startsWith(Track.ONLINE_BILIBILI_PREFIX)
+            ? track.filePath.slice(Track.ONLINE_BILIBILI_PREFIX.length)
+            : null),
+        )
+        .filter((bvid): bvid is string => Boolean(bvid));
+      const seedBvids = [
+        ...history.map((entry) => entry.bvid),
+        ...favoriteBvids,
+      ].filter((bvid, index, list) => list.indexOf(bvid) === index);
+
+      let items: TrendingMusicItem[];
+      if (seedBvids.length < 2) {
+        const trending = await this.getCachedTrendingMusic();
+        items = this.shuffle(
+          trending.filter((item) => !savedBvids.has(item.bvid) && !recentBvids.has(item.bvid)),
+        ).slice(0, 20);
+      } else {
+        items = await invoke<TrendingMusicItem[]>("fetch_related_music", {
+          seedBvids: seedBvids.slice(0, 3),
+          excludedBvids: [...new Set([...savedBvids, ...recentBvids])],
+        });
+      }
+
+      await db.setSetting(
+        OnlineMusicService.RECOMMENDED_CACHE_KEY,
+        JSON.stringify({ fetchedAt: Date.now(), items }),
+      );
+      return items;
+    })();
+    try {
+      return await this.recommendedFetchPromise;
+    } finally {
+      this.recommendedFetchPromise = null;
     }
   }
 
@@ -149,7 +257,10 @@ export class OnlineMusicService {
     const track = this.buildTrack(item, filePath);
 
     const lib = LibraryManager.getInstance();
-    lib.addTrack(track);
+    await lib.addTrack(track);
+    if (item.source === "bilibili") {
+      await DatabaseManager.getInstance().recordOnlineLibrarySource(item.bvid);
+    }
 
     return track;
   }
@@ -178,11 +289,15 @@ export class OnlineMusicService {
       durationSecs: item.duration_secs,
       genre: "Online",
       hasArtwork: false,
+      onlineBvid: item.source === "bilibili" ? item.bvid : null,
     });
 
     const lib = LibraryManager.getInstance();
     // addTrack skips duplicates (same virtual id → same track id).
     await lib.addTrack(track);
+    if (item.source === "bilibili") {
+      await DatabaseManager.getInstance().recordOnlineLibrarySource(item.bvid);
+    }
     return track;
   }
 
@@ -224,6 +339,16 @@ export class OnlineMusicService {
       durationSecs: item.duration_secs,
       genre: "Online",
       hasArtwork: false,
+      onlineBvid: item.source === "bilibili" ? item.bvid : null,
     });
+  }
+
+  private shuffle<T>(items: T[]): T[] {
+    const shuffled = [...items];
+    for (let index = shuffled.length - 1; index > 0; index--) {
+      const swapIndex = Math.floor(Math.random() * (index + 1));
+      [shuffled[index], shuffled[swapIndex]] = [shuffled[swapIndex], shuffled[index]];
+    }
+    return shuffled;
   }
 }

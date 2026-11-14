@@ -45,6 +45,7 @@ export class DatabaseManager {
       CREATE TABLE IF NOT EXISTS tracks (
         id          TEXT PRIMARY KEY,
         file_path   TEXT NOT NULL UNIQUE,
+        online_bvid TEXT,
         title       TEXT NOT NULL DEFAULT 'Unknown',
         artist      TEXT NOT NULL DEFAULT 'Unknown Artist',
         album       TEXT NOT NULL DEFAULT 'Unknown Album',
@@ -93,6 +94,20 @@ export class DatabaseManager {
       );
     `);
 
+    await this.db.execute(`
+      CREATE TABLE IF NOT EXISTS online_listening_history (
+        bvid        TEXT PRIMARY KEY,
+        play_count  INTEGER NOT NULL DEFAULT 0,
+        last_played TEXT NOT NULL
+      );
+    `);
+
+    await this.db.execute(`
+      CREATE TABLE IF NOT EXISTS online_library_sources (
+        bvid TEXT PRIMARY KEY
+      );
+    `);
+
     // Migration: track *listened seconds* per day (added for the listening-hours
     // stats). Existing databases predate the column, and CREATE TABLE IF NOT
     // EXISTS won't add it, so ALTER explicitly and ignore "duplicate column".
@@ -106,6 +121,9 @@ export class DatabaseManager {
       .catch(() => { /* column already exists */ });
     await this.db
       .execute("ALTER TABLE tracks ADD COLUMN resume_position_secs REAL NOT NULL DEFAULT 0")
+      .catch(() => { /* column already exists */ });
+    await this.db
+      .execute("ALTER TABLE tracks ADD COLUMN online_bvid TEXT")
       .catch(() => { /* column already exists */ });
 
     // Cross-device listening totals. Kept SEPARATE from `play_history` (which
@@ -128,12 +146,13 @@ export class DatabaseManager {
     await this.ensureDb();
     await this.db!.execute(
       `INSERT OR REPLACE INTO tracks
-       (id, file_path, title, artist, album, album_artist,
+       (id, file_path, online_bvid, title, artist, album, album_artist,
         duration_secs, track_number, disc_number, genre, year, codec, has_artwork, is_favorite)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)`,
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)`,
       [
         track.id,
         track.filePath,
+        (track as Track).onlineBvid,
         track.title,
         track.artist,
         track.album,
@@ -478,6 +497,57 @@ export class DatabaseManager {
          seconds = MAX(play_stats_merged.seconds, excluded.seconds)`,
       [date]
     );
+  }
+
+  /** Record a Bilibili play for recommendation seed selection. */
+  async recordOnlinePlay(bvid: string): Promise<void> {
+    const id = bvid.trim();
+    if (!id) return;
+    await this.ensureDb();
+    await this.db!.execute(
+      `INSERT INTO online_listening_history (bvid, play_count, last_played)
+       VALUES ($1, 1, datetime('now'))
+       ON CONFLICT(bvid) DO UPDATE SET
+         play_count = play_count + 1,
+         last_played = datetime('now')`,
+      [id],
+    );
+  }
+
+  async getOnlineListeningHistory(): Promise<Array<{
+    bvid: string;
+    playCount: number;
+    lastPlayed: string;
+  }>> {
+    await this.ensureDb();
+    const rows: any[] = await this.db!.select(
+      `SELECT bvid, play_count, last_played
+       FROM online_listening_history
+       ORDER BY play_count DESC, last_played DESC`,
+    );
+    return rows.map((row) => ({
+      bvid: String(row.bvid),
+      playCount: Number(row.play_count) || 0,
+      lastPlayed: String(row.last_played),
+    }));
+  }
+
+  async recordOnlineLibrarySource(bvid: string): Promise<void> {
+    const id = bvid.trim();
+    if (!id) return;
+    await this.ensureDb();
+    await this.db!.execute(
+      "INSERT OR IGNORE INTO online_library_sources (bvid) VALUES ($1)",
+      [id],
+    );
+  }
+
+  async getOnlineLibrarySources(): Promise<string[]> {
+    await this.ensureDb();
+    const rows: any[] = await this.db!.select(
+      "SELECT bvid FROM online_library_sources ORDER BY bvid",
+    );
+    return rows.map((row) => String(row.bvid));
   }
 
   /**
