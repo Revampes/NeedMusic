@@ -256,6 +256,7 @@ const WebApp: React.FC = () => {
   const [error, setError] = useState<string | null>(null);
   const [tracks, setTracks] = useState<TrackData[]>([]);
   const [activeTab, setActiveTab] = useState("Tracks");
+  const [onlineSearchOpen, setOnlineSearchOpen] = useState(false);
   const [searchQuery, setSearchQuery] = useState("");
   const [filterField, setFilterField] = useState("All");
   const [sortMode, setSortMode] = useState("default");
@@ -304,6 +305,7 @@ const WebApp: React.FC = () => {
   const persistTracksRef = useRef<((ts: TrackData[]) => void) | null>(null);
   // Track id currently being downloaded (for UI feedback).
   const [downloadingId, setDownloadingId] = useState<string | null>(null);
+  const [processingLabel, setProcessingLabel] = useState<string | null>(null);
   // Bumped whenever a downloaded copy is added/removed so status indicators
   // (badges, summary counts) re-render — the blob map itself is a ref.
   const [dlVersion, setDlVersion] = useState(0);
@@ -369,6 +371,7 @@ const WebApp: React.FC = () => {
         throw new Error("its audio is in your Google Drive but you are not signed in — sign in under Drive");
       }
       setDownloadingId(td.id);
+      setProcessingLabel(`Downloading “${td.title}”…`);
       try {
         const buf = await downloadAudioFile(driveTokenRef.current, fileId);
         const blob = new Blob([buf], { type: "audio/mpeg" });
@@ -384,6 +387,7 @@ const WebApp: React.FC = () => {
         return url;
       } finally {
         setDownloadingId(null);
+        setProcessingLabel(null);
       }
     }
 
@@ -399,6 +403,7 @@ const WebApp: React.FC = () => {
       );
     }
     setDownloadingId(td.id);
+    setProcessingLabel(`Downloading “${td.title}”…`);
     try {
       // Chunked Range download — iOS Safari can't fetch whole audio files
       // over HTTP, but handles many small range requests without issue.
@@ -416,6 +421,7 @@ const WebApp: React.FC = () => {
       return url;
     } finally {
       setDownloadingId(null);
+      setProcessingLabel(null);
     }
   }, [lanUrl, cloudUrl]);
 
@@ -527,6 +533,7 @@ const WebApp: React.FC = () => {
    * The Files app unzips natively.
    */
   const saveAllToFiles = useCallback(async () => {
+    setProcessingLabel("Preparing your music archive…");
     try {
       const downloads = await getAllDownloadedAudio();
       if (downloads.length === 0) {
@@ -551,6 +558,8 @@ const WebApp: React.FC = () => {
       setPlayError(null);
     } catch (e: any) {
       setPlayError(`Couldn't create the archive: ${(e && e.message) || e}`);
+    } finally {
+      setProcessingLabel(null);
     }
   }, []);
 
@@ -1309,9 +1318,6 @@ const WebApp: React.FC = () => {
           <div className={`icon-nav-item ${activeTab === "Tracks" ? "active" : ""}`} onClick={() => setActiveTab("Tracks")} title="Tracks"><IconLibrary size={18} /><span className="nav-label">Tracks</span></div>
           <div className={`icon-nav-item ${activeTab === "Playlists" ? "active" : ""}`} onClick={() => setActiveTab("Playlists")} title="Playlists"><IconPlaylist size={18} /><span className="nav-label">Playlists</span></div>
           <div className={`icon-nav-item ${activeTab === "Queue" ? "active" : ""}`} onClick={() => setActiveTab(activeTab === "Queue" ? "Tracks" : "Queue")} title="Queue & Favorites"><IconClock size={18} /><span className="nav-label">Queue</span></div>
-          {(cloudUrl || lanUrl) && (
-            <div className={`icon-nav-item ${activeTab === "Online" ? "active" : ""}`} onClick={() => setActiveTab("Online")} title="Online Search"><IconGlobe size={18} /><span className="nav-label">Online</span></div>
-          )}
           <div className="icon-nav-spacer" />
           <div className={`icon-nav-item ${activeTab === "Settings" ? "active" : ""}`} onClick={() => setActiveTab("Settings")} title="Settings"><IconSettings size={18} /><span className="nav-label">Settings</span></div>
           {/* Google Drive / login */}
@@ -1340,6 +1346,13 @@ const WebApp: React.FC = () => {
                 {SORT_OPTIONS.map((o) => (<option key={o.value} value={o.value}>{o.label}</option>))}
               </select>
               <input className="search-input" type="text" placeholder="Search..." value={searchQuery} onChange={(e) => setSearchQuery(e.target.value)} />
+              <button
+                className="online-search-btn"
+                onClick={() => setOnlineSearchOpen((open) => !open)}
+                title={onlineSearchOpen ? "Close online search" : "Search online music"}
+              >
+                <IconGlobe size={14} /> {onlineSearchOpen ? "Hide Online Search" : "Online Search"}
+              </button>
               <button
                 className={`lan-chip ${lanChip.cls}`}
                 onClick={() => setActiveTab("Settings")}
@@ -1407,15 +1420,7 @@ const WebApp: React.FC = () => {
                 <button onClick={() => setPlayError(null)} style={{ background: "none", border: "none", color: "inherit", cursor: "pointer", padding: 2 }} title="Dismiss"><IconClose size={12} /></button>
               </div>
             )}
-            {activeTab === "Online" ? (
-              <WebOnlineSearch
-                cloudUrl={cloudUrl}
-                lanUrl={lanUrl}
-                onSave={handleOnlineSave}
-                saveMsg={onlineSaveMsg}
-                onOpenSettings={() => setActiveTab("Settings")}
-              />
-            ) : activeTab === "Playlists" ? (
+            {activeTab === "Playlists" ? (
               <WebPlaylistsView tracks={tracks} onPlay={handlePlayTrack} onChanged={(ids) => ids?.forEach((id) => driveSync.touchPlaylist(id))} />
             ) : activeTab === "Queue" ? (
               <div className="queue-tab">
@@ -1477,6 +1482,22 @@ const WebApp: React.FC = () => {
                 />
             ) : (
               <>
+                {onlineSearchOpen ? (
+                  <section className="tracks-online-search tracks-online-search-fullpage">
+                    <div className="tracks-online-search-heading">
+                      <strong>Online Search</strong>
+                      <button className="settings-btn" onClick={() => setOnlineSearchOpen(false)}>Back to tracks</button>
+                    </div>
+                    <WebOnlineSearch
+                      cloudUrl={cloudUrl}
+                      lanUrl={lanUrl}
+                      onSave={handleOnlineSave}
+                      saveMsg={onlineSaveMsg}
+                      onOpenSettings={() => setActiveTab("Settings")}
+                    />
+                  </section>
+                ) : (
+                <>
                 {tracks.length > 0 && (
                   <div className="track-summary">
                     <span className="ts-label">Library:</span>
@@ -1499,6 +1520,8 @@ const WebApp: React.FC = () => {
                   downloadingId={downloadingId}
                   lanUrl={lanUrl}
                 />
+                </>
+                )}
               </>
             )}
           </div>
@@ -1624,6 +1647,7 @@ const WebApp: React.FC = () => {
           }}
         />
       )}
+      {processingLabel && <ProcessingOverlay label={processingLabel} />}
     </div>
   );
 };
@@ -2078,6 +2102,13 @@ const WebSettingsView: React.FC<{
 // UI shows which backend answered.
 
 type SearchBackend = "cloud" | "lan";
+const WEB_SEARCH_HISTORY_KEY = "needmusic:onlineSearchHistory";
+function readWebSearchHistory(): string[] {
+  try {
+    const parsed = JSON.parse(localStorage.getItem(WEB_SEARCH_HISTORY_KEY) || "[]");
+    return Array.isArray(parsed) ? parsed.filter((q): q is string => typeof q === "string").slice(0, 5) : [];
+  } catch { return []; }
+}
 
 const WebOnlineSearch: React.FC<{
   cloudUrl: string;
@@ -2087,6 +2118,7 @@ const WebOnlineSearch: React.FC<{
   onOpenSettings: () => void;
 }> = ({ cloudUrl, lanUrl, onSave, saveMsg, onOpenSettings }) => {
   const [q, setQ] = useState("");
+  const [history, setHistory] = useState<string[]>(readWebSearchHistory);
   const [results, setResults] = useState<any[]>([]);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -2096,9 +2128,12 @@ const WebOnlineSearch: React.FC<{
   const hasCloud = cloudUrl.trim().length > 0;
   const hasLan = lanUrl.trim().length > 0;
 
-  const search = async () => {
-    const query = q.trim();
+  const search = async (requestedQuery?: string) => {
+    const query = (requestedQuery ?? q).trim();
     if (!query) return;
+    const nextHistory = [query, ...history.filter((item) => item.toLocaleLowerCase() !== query.toLocaleLowerCase())].slice(0, 5);
+    setHistory(nextHistory);
+    try { localStorage.setItem(WEB_SEARCH_HISTORY_KEY, JSON.stringify(nextHistory)); } catch { /* history is optional */ }
     if (!hasCloud && !hasLan) {
       setError("No search backend configured. Connect to your computer (LAN Sync) or enable Cloud Search in Settings.");
       return;
@@ -2180,6 +2215,14 @@ const WebOnlineSearch: React.FC<{
           {loading ? "Searching..." : "Search"}
         </button>
       </div>
+      {history.length > 0 && (
+        <div className="online-search-history" aria-label="Recent searches">
+          <span>Recent:</span>
+          {history.map((item) => (
+            <button key={item} onClick={() => { setQ(item); void search(item); }} disabled={loading}>{item}</button>
+          ))}
+        </div>
+      )}
       {!hasCloud && !hasLan && !results.length && (
         <div className="online-warning" style={{ marginTop: 8 }}>
           <IconAlert size={14} />

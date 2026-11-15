@@ -29,6 +29,7 @@ import {
   cacheToken,
   getCachedToken,
   getCachedTokenExpiry,
+  getCachedRefreshToken,
   clearCachedCredentials,
   getGoogleClientId,
   hasGoogleClientId,
@@ -189,13 +190,21 @@ export function useGoogleSync({
     restoreRef.current = true;
     if (!hasGoogleClientId()) return;
     if (getCachedToken()) return;
-    if (!readAccount()) return;
+    // Desktop PKCE persists a refresh token independently of the display-only
+    // account profile. Requiring both caused a valid desktop session to be
+    // ignored after a reboot when the browser flow had not populated GIS's
+    // profile cache.
+    if (!readAccount() && !getCachedRefreshToken()) return;
 
     (async () => {
       if (refreshAccessToken) {
         try {
           const access = await refreshAccessToken();
-          if (access) { cacheToken(access); setToken(access); }
+          if (access) {
+            cacheToken(access, 3600);
+            setToken(access);
+            setter({ state: "synced", detail: "Session restored — syncing…", at: new Date().toISOString() });
+          }
         } catch { /* expired — user re-signs in */ }
         return;
       }
@@ -231,6 +240,7 @@ export function useGoogleSync({
     let tk = tokenRef.current;
     if (!tk) return;
     if (!readyRef.current) return;
+    setter({ state: "syncing", detail: "Syncing with Google Drive…" });
 
     // Access tokens returned by the desktop PKCE flow have no expiry stored
     // by older versions, so only renew when a known expiry is near.  A 401
@@ -284,7 +294,8 @@ export function useGoogleSync({
 
     // 3) Apply locally.
     await onApplyMergedRef.current(merged, tk);
-  }, [invalidateAuth, refreshTokenNow]);
+    setter({ state: "synced", detail: "Synced", at: new Date().toISOString() });
+  }, [invalidateAuth, refreshTokenNow, setter]);
 
   const syncCycleRef = useRef(syncCycle);
   syncCycleRef.current = syncCycle;

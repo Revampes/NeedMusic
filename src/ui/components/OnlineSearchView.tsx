@@ -37,10 +37,20 @@ const ProxiedCover: React.FC<{ url: string; alt: string }> = ({ url, alt }) => {
 
 interface OnlineSearchViewProps {
   onTrackSaved: () => void;
+  onProcessingChange?: (label: string | null) => void;
 }
 
-const OnlineSearchView: React.FC<OnlineSearchViewProps> = ({ onTrackSaved }) => {
+const SEARCH_HISTORY_KEY = "needmusic:onlineSearchHistory";
+function readSearchHistory(): string[] {
+  try {
+    const parsed = JSON.parse(localStorage.getItem(SEARCH_HISTORY_KEY) || "[]");
+    return Array.isArray(parsed) ? parsed.filter((q): q is string => typeof q === "string").slice(0, 5) : [];
+  } catch { return []; }
+}
+
+const OnlineSearchView: React.FC<OnlineSearchViewProps> = ({ onTrackSaved, onProcessingChange }) => {
   const [query, setQuery] = useState("");
+  const [history, setHistory] = useState<string[]>(readSearchHistory);
   // Merged results from Bilibili + YouTube (no platform separation).
   const [results, setResults] = useState<OnlineSearchItem[]>([]);
   const [loading, setLoading] = useState(false);
@@ -93,9 +103,12 @@ const OnlineSearchView: React.FC<OnlineSearchViewProps> = ({ onTrackSaved }) => 
   }, [warning]);
 
   // Search both sources
-  const handleSearch = useCallback(async () => {
-    const q = query.trim();
+  const handleSearch = useCallback(async (requestedQuery?: string) => {
+    const q = (requestedQuery ?? query).trim();
     if (!q) return;
+    const nextHistory = [q, ...history.filter((item) => item.toLocaleLowerCase() !== q.toLocaleLowerCase())].slice(0, 5);
+    setHistory(nextHistory);
+    try { localStorage.setItem(SEARCH_HISTORY_KEY, JSON.stringify(nextHistory)); } catch { /* history is optional */ }
     setLoading(true);
     setError(null);
     setWarning(null);
@@ -139,7 +152,7 @@ const OnlineSearchView: React.FC<OnlineSearchViewProps> = ({ onTrackSaved }) => 
     } finally {
       setLoading(false);
     }
-  }, [query, youtubeEnabled, service]);
+  }, [query, history, youtubeEnabled, service]);
 
   const handleKeyDown = useCallback(
     (e: React.KeyboardEvent) => {
@@ -151,6 +164,7 @@ const OnlineSearchView: React.FC<OnlineSearchViewProps> = ({ onTrackSaved }) => 
   // Download & play
   const handlePlay = useCallback(async (item: OnlineSearchItem) => {
     setDownloading(item.id);
+    onProcessingChange?.(`Downloading “${item.title}” for playback…`);
     setError(null);
     try {
       const track = await service.downloadAndPlay(item);
@@ -159,12 +173,14 @@ const OnlineSearchView: React.FC<OnlineSearchViewProps> = ({ onTrackSaved }) => 
       setError(String(err));
     } finally {
       setDownloading(null);
+      onProcessingChange?.(null);
     }
-  }, [engine, service]);
+  }, [engine, service, onProcessingChange]);
 
   // Save to library WITHOUT downloading (virtual online track).
   const handleSave = useCallback(async (item: OnlineSearchItem) => {
     setDownloading(item.id);
+    onProcessingChange?.(`Saving “${item.title}” to your library…`);
     setError(null);
     try {
       await service.saveToLibraryVirtual(item);
@@ -173,8 +189,9 @@ const OnlineSearchView: React.FC<OnlineSearchViewProps> = ({ onTrackSaved }) => 
       setError(String(err));
     } finally {
       setDownloading(null);
+      onProcessingChange?.(null);
     }
-  }, [onTrackSaved, service]);
+  }, [onTrackSaved, service, onProcessingChange]);
 
   // Download audio file into the music library (old Save behavior).
   const handleDownload = useCallback(async (item: OnlineSearchItem) => {
@@ -183,6 +200,7 @@ const OnlineSearchView: React.FC<OnlineSearchViewProps> = ({ onTrackSaved }) => 
       return;
     }
     setDownloading(item.id);
+    onProcessingChange?.(`Downloading “${item.title}”…`);
     setError(null);
     try {
       await service.saveToLibrary(item, downloadDir);
@@ -191,8 +209,9 @@ const OnlineSearchView: React.FC<OnlineSearchViewProps> = ({ onTrackSaved }) => 
       setError(String(err));
     } finally {
       setDownloading(null);
+      onProcessingChange?.(null);
     }
-  }, [downloadDir, onTrackSaved, service]);
+  }, [downloadDir, onTrackSaved, service, onProcessingChange]);
 
   const hasResults = results.length > 0;
   const searchPlaceholder = youtubeEnabled
@@ -210,7 +229,7 @@ const OnlineSearchView: React.FC<OnlineSearchViewProps> = ({ onTrackSaved }) => 
         <button
           className="online-result-play-btn"
           onClick={() => handlePlay(item)}
-          disabled={downloading === item.id}
+          disabled={downloading !== null}
           title="Play now (temp download)"
         >
           {downloading === item.id ? (
@@ -240,7 +259,7 @@ const OnlineSearchView: React.FC<OnlineSearchViewProps> = ({ onTrackSaved }) => 
           <button
             className="online-action-btn play"
             onClick={() => handlePlay(item)}
-            disabled={downloading === item.id}
+            disabled={downloading !== null}
             title="Play now (temp download)"
           >
             {downloading === item.id ? (
@@ -253,7 +272,7 @@ const OnlineSearchView: React.FC<OnlineSearchViewProps> = ({ onTrackSaved }) => 
           <button
             className="online-action-btn save"
             onClick={() => handleSave(item)}
-            disabled={downloading === item.id}
+            disabled={downloading !== null}
             title="Save to library without downloading (plays via API)"
           >
             <IconPlus size={12} />
@@ -262,7 +281,7 @@ const OnlineSearchView: React.FC<OnlineSearchViewProps> = ({ onTrackSaved }) => 
           <button
             className="online-action-btn download"
             onClick={() => handleDownload(item)}
-            disabled={downloading === item.id || !downloadDir}
+            disabled={downloading !== null || !downloadDir}
             title={downloadDir ? "Download audio to library" : "Download path not set — check Settings"}
           >
             <IconDownload size={12} />
@@ -291,7 +310,7 @@ const OnlineSearchView: React.FC<OnlineSearchViewProps> = ({ onTrackSaved }) => 
         <button
           className="online-action-btn play"
           onClick={() => handlePlay(item)}
-          disabled={downloading === item.id}
+          disabled={downloading !== null}
           title="Play now"
         >
           {downloading === item.id ? <span className="online-spinner" /> : <IconPlay size={12} />}
@@ -300,7 +319,7 @@ const OnlineSearchView: React.FC<OnlineSearchViewProps> = ({ onTrackSaved }) => 
         <button
           className="online-action-btn save"
           onClick={() => handleSave(item)}
-          disabled={downloading === item.id}
+          disabled={downloading !== null}
           title="Save to library without downloading (plays via API)"
         >
           <IconPlus size={12} />
@@ -309,7 +328,7 @@ const OnlineSearchView: React.FC<OnlineSearchViewProps> = ({ onTrackSaved }) => 
         <button
           className="online-action-btn download"
           onClick={() => handleDownload(item)}
-          disabled={downloading === item.id || !downloadDir}
+          disabled={downloading !== null || !downloadDir}
           title={downloadDir ? "Download audio to library" : "Download path not set — check Settings"}
         >
           <IconDownload size={12} />
@@ -340,7 +359,7 @@ const OnlineSearchView: React.FC<OnlineSearchViewProps> = ({ onTrackSaved }) => 
         />
         <button
           className="online-search-btn"
-          onClick={handleSearch}
+          onClick={() => void handleSearch()}
           disabled={loading || !query.trim()}
         >
           {loading ? "Searching..." : "Search"}
@@ -356,6 +375,17 @@ const OnlineSearchView: React.FC<OnlineSearchViewProps> = ({ onTrackSaved }) => 
           </button>
         )}
       </div>
+
+      {history.length > 0 && (
+        <div className="online-search-history" aria-label="Recent searches">
+          <span>Recent:</span>
+          {history.map((item) => (
+            <button key={item} onClick={() => { setQuery(item); void handleSearch(item); }} disabled={loading}>
+              {item}
+            </button>
+          ))}
+        </div>
+      )}
 
       {/* Error */}
       {error && (

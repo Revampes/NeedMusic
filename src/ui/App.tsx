@@ -8,8 +8,6 @@ import { DatabaseManager } from "@core/services/DatabaseManager";
 import { DiscordRpcService } from "@core/services/DiscordRpcService";
 import type { ITrack, PlayerState } from "@core/interfaces";
 import { Track } from "@core/models/Track";
-import { Album } from "@core/models/Album";
-import { Artist } from "@core/models/Artist";
 import { BackgroundEngine } from "@core/utils/BackgroundEngine";
 import { DragBridge } from "@core/services/DragBridge";
 import { CustomContextMenu, ContextMenuEntry } from "@ui/components/CustomContextMenu";
@@ -34,7 +32,7 @@ import {
   IconLibrary, IconHeart, IconHeartFill, IconPlaylist, IconSettings,
   IconMusic, IconImage, IconPrevious, IconPlay, IconPause, IconNext, IconStop,
   IconRepeatOff, IconRepeat, IconRepeatOne, IconShuffle, IconVolume,
-  IconClock, IconPlus, IconDisc, IconMic, IconGlobe, IconClose, IconHome,
+  IconClock, IconPlus, IconGlobe, IconClose, IconHome,
   IconAlert, IconLogin,
   IconLyrics,
 } from "@ui/components/Icons";
@@ -85,6 +83,8 @@ const App: React.FC = () => {
   const [error, setError] = useState<string | null>(null);
   const [tracks, setTracks] = useState<Track[]>([]);
   const [activeTab, setActiveTab] = useState("Home");
+  const [onlineSearchOpen, setOnlineSearchOpen] = useState(false);
+  const [processingLabel, setProcessingLabel] = useState<string | null>(null);
   const [searchQuery, setSearchQuery] = useState("");
   const [filterField, setFilterField] = useState("All");
   const [sortMode, setSortMode] = useState("default");
@@ -820,17 +820,14 @@ const App: React.FC = () => {
         <nav className="icon-sidebar">
           <div className={`icon-nav-item ${activeTab === "Home" ? "active" : ""}`} onClick={() => setActiveTab("Home")} title="Home"><IconHome size={18} /></div>
           <div className={`icon-nav-item ${activeTab === "Tracks" ? "active" : ""}`} onClick={() => setActiveTab("Tracks")} title="Tracks"><IconLibrary size={18} /></div>
-          <div className={`icon-nav-item ${activeTab === "Albums" ? "active" : ""}`} onClick={() => setActiveTab("Albums")} title="Albums"><IconDisc size={18} /></div>
-          <div className={`icon-nav-item ${activeTab === "Artists" ? "active" : ""}`} onClick={() => setActiveTab("Artists")} title="Artists"><IconMic size={18} /></div>
           <div className={`icon-nav-item ${activeTab === "Playlists" ? "active" : ""}`} onClick={() => setActiveTab("Playlists")} title="Playlists"><IconPlaylist size={18} /></div>
-          <div className={`icon-nav-item ${activeTab === "Online" ? "active" : ""}`} onClick={() => setActiveTab("Online")} title="Online"><IconGlobe size={18} /></div>
           <div className="icon-nav-spacer" />
           <div className={`icon-nav-item ${activeTab === "Settings" ? "active" : ""}`} onClick={() => setActiveTab("Settings")} title="Settings"><IconSettings size={18} /></div>
           <div className={`icon-nav-item ${activeTab === "Drive" ? "active" : ""}`} onClick={() => setActiveTab("Drive")} title="Google Drive Sync"><IconLogin size={18} /></div>
         </nav>
         <div className="main-area">
           {/* Inline search bar */}
-          {(activeTab === "Tracks" || activeTab === "Albums" || activeTab === "Artists") && (
+          {activeTab === "Tracks" && (
             <div className="content-search-bar">
               <select
                 className="filter-select"
@@ -858,18 +855,18 @@ const App: React.FC = () => {
                 value={searchQuery}
                 onChange={(e) => setSearchQuery(e.target.value)}
               />
+              <button
+                className="online-search-btn"
+                onClick={() => setOnlineSearchOpen((open) => !open)}
+                title={onlineSearchOpen ? "Close online search" : "Search online music"}
+              >
+                <IconGlobe size={14} /> {onlineSearchOpen ? "Hide Online Search" : "Online Search"}
+              </button>
             </div>
           )}
           <div className="content-area">
             {activeTab === "Home" ? <HomeView tracks={tracks} currentTrack={ct as Track | null} onPlay={handlePlayTrack} onTrackSaved={() => setTracks(LibraryManager.getInstance().getAllTracks())} /> :
-             activeTab === "Albums" ? <AlbumsView tracks={filteredTracks} onPlay={handlePlayTrack} /> :
-             activeTab === "Artists" ? <ArtistsView tracks={filteredTracks} /> :
              activeTab === "Playlists" ? <PlaylistsView tracks={tracks} onChanged={() => setPlaylistVersion((v) => v + 1)} /> :
-             activeTab === "Online" ? (
-               <OnlineSearchView
-                 onTrackSaved={() => setTracks(LibraryManager.getInstance().getAllTracks())}
-               />
-             ) :
              activeTab === "Drive" ? (
                <div className="track-list" style={{ padding: 24 }}>
                  <GoogleDriveSyncPanel
@@ -901,7 +898,22 @@ const App: React.FC = () => {
                  onTracksLoaded={setTracks}
                />
              ) :
-             <TrackListView tracks={filteredTracks} currentTrack={ct} onPlay={handlePlayTrack} onToggleFav={handleToggleFavorite} onRemove={handleRemoveTrack} onTitleChange={handleTitleChange} onPlaylistChanged={(ids) => { ids?.forEach((id) => driveSync.touchPlaylist(id)); setPlaylistVersion((v) => v + 1); }} driveSync={driveSync} />}
+             <div className="tracks-page">
+               {onlineSearchOpen ? (
+                 <section className="tracks-online-search">
+                   <div className="tracks-online-search-heading">
+                     <strong>Online Search</strong>
+                     <button className="settings-btn" onClick={() => setOnlineSearchOpen(false)}>Back to tracks</button>
+                   </div>
+                   <OnlineSearchView
+                     onTrackSaved={() => setTracks(LibraryManager.getInstance().getAllTracks())}
+                     onProcessingChange={setProcessingLabel}
+                   />
+                 </section>
+               ) : (
+                 <TrackListView tracks={filteredTracks} currentTrack={ct} onPlay={handlePlayTrack} onToggleFav={handleToggleFavorite} onRemove={handleRemoveTrack} onTitleChange={handleTitleChange} onPlaylistChanged={(ids) => { ids?.forEach((id) => driveSync.touchPlaylist(id)); setPlaylistVersion((v) => v + 1); }} driveSync={driveSync} />
+               )}
+             </div>}
           </div>
         </div>
           {showLyrics ? (
@@ -1001,9 +1013,21 @@ const App: React.FC = () => {
           onCancel={() => setPendingDelete(null)}
         />
       )}
+      {processingLabel && <ProcessingOverlay label={processingLabel} />}
     </div>
   );
 };
+
+const ProcessingOverlay: React.FC<{ label: string }> = ({ label }) => (
+  <div className="processing-overlay" role="status" aria-live="polite">
+    <div className="processing-card">
+      <span className="processing-spinner" />
+      <strong>{label}</strong>
+      <span className="processing-progress"><span /></span>
+      <small>Please wait while NeedMusic finishes this task.</small>
+    </div>
+  </div>
+);
 
 export default App;
 
@@ -1119,33 +1143,3 @@ const TrackListView: React.FC<{ tracks: Track[]; currentTrack: ITrack | null; on
   );
 };
 
-const AlbumsView: React.FC<{ tracks: Track[]; onPlay: (t: Track) => void }> = ({ tracks, onPlay }) => {
-  const albums = [...Album.groupByAlbum(tracks).values()];
-  return (
-    <div className="track-list">
-      <div className="track-list-header"><span style={{ flex:1,paddingLeft:16 }}>Album</span><span style={{ width:180 }}>Artist</span><span style={{ width:80,textAlign:"right",paddingRight:16 }}>Tracks</span></div>
-      {albums.length === 0 ? <div className="track-empty">No albums.</div> : albums.map((a) => (
-        <div key={a.title + a.artist} className="track-row" onDoubleClick={() => a.tracks[0] && onPlay(a.tracks[0])}>
-          <span style={{ flex:1 }}><IconDisc size={16} style={{ marginRight: 6 }} />{a.title}</span>
-          <span style={{ width:180,color:"#888" }}>{a.artist}</span>
-          <span style={{ width:80,textAlign:"right",color:"#555",paddingRight:16 }}>{a.trackCount}</span>
-        </div>
-      ))}
-    </div>
-  );
-};
-
-const ArtistsView: React.FC<{ tracks: Track[] }> = ({ tracks }) => {
-  const artists = [...Artist.groupByArtist(tracks).values()];
-  return (
-    <div className="track-list">
-      <div className="track-list-header"><span style={{ flex:1,paddingLeft:16 }}>Artist</span><span style={{ width:140,textAlign:"right",paddingRight:16 }}>Albums / Tracks</span></div>
-      {artists.length === 0 ? <div className="track-empty">No artists.</div> : artists.map((a) => (
-        <div key={a.name} className="track-row">
-          <span style={{ flex:1 }}><IconMic size={16} style={{ marginRight: 6 }} />{a.name}</span>
-          <span style={{ width:140,textAlign:"right",color:"#555",paddingRight:16 }}>{a.albumCount} albums / {a.trackCount} tracks</span>
-        </div>
-      ))}
-    </div>
-  );
-};

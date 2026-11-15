@@ -1877,3 +1877,21 @@ html.glass-opacity-100 { --glass-bg-opacity: 0.88; }
   from { opacity: 0; transform: translate(-50%, calc(-100% + 4px)); }
   to   { opacity: 1; transform: translate(-50%, -100%); }
 }
+
+/* Tracks-page online search and blocking work feedback. */
+.tracks-page { flex: 1; min-height: 0; display: flex; flex-direction: column; overflow: hidden; }
+.tracks-online-search { flex: 1 1 auto; min-height: 0; display: flex; flex-direction: column; overflow: auto; }
+.tracks-online-search-fullpage { width: 100%; }
+.tracks-online-search-heading { display: flex; align-items: center; justify-content: space-between; padding: 8px var(--space-4); border-bottom: 1px solid var(--glass-border); }
+.tracks-online-search .online-search-view { min-height: 0; padding: var(--space-3) var(--space-4); }
+.online-search-history { display: flex; align-items: center; flex-wrap: wrap; gap: 6px; margin: -8px 0 var(--space-3); color: var(--text-tertiary); font-size: var(--text-xs); }
+.online-search-history button { border: 1px solid var(--glass-border); border-radius: var(--radius-full); padding: 3px 9px; color: var(--text-secondary); background: var(--btn-hover-bg); cursor: pointer; }
+.online-search-history button:hover:not(:disabled) { color: var(--text-body); border-color: var(--glass-border-strong); }
+.processing-overlay { position: fixed; inset: 0; z-index: 10000; display: grid; place-items: center; background: rgba(10,10,10,.66); backdrop-filter: blur(3px); }
+.processing-card { width: min(380px, calc(100vw - 40px)); display: flex; flex-direction: column; align-items: center; gap: 14px; padding: 26px; border: 1px solid var(--glass-border-strong); border-radius: var(--radius-xl); background: var(--elevated-bg); box-shadow: var(--glass-shadow); text-align: center; }
+.processing-card small { color: var(--text-secondary); }
+.processing-spinner { width: 32px; height: 32px; border: 3px solid rgba(255,255,255,.12); border-top-color: var(--accent-primary); border-radius: 50%; animation: processingSpin .8s linear infinite; }
+.processing-progress { width: 100%; height: 4px; overflow: hidden; border-radius: 99px; background: rgba(255,255,255,.1); }
+.processing-progress > span { display: block; width: 35%; height: 100%; background: var(--accent-primary); border-radius: inherit; animation: processingProgress 1.4s ease-in-out infinite; }
+@keyframes processingSpin { to { transform: rotate(360deg); } }
+@keyframes processingProgress { from { transform: translateX(-110%); } to { transform: translateX(310%); } }
