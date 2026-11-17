@@ -1452,6 +1452,7 @@ const WebApp: React.FC = () => {
                   audioMode={driveSync.audioMode}
                   onAudioModeChange={driveSync.setAudioMode}
                   offlineCount={driveSync.mergedInfo.audioRequests.size}
+                  driveItems={(driveSync.mergedInfo.tracks ?? []).map((t) => ({ songKey: t.songKey, title: t.title, hasAudio: !!t.driveFileId }))}
                 />
                 {/* ── Offline cache budget (keeps this device's storage in check) ── */}
                 <OfflineCacheSettings onChanged={() => setDlVersion((v) => v + 1)} />
@@ -2385,7 +2386,7 @@ const WebPlaylistsView: React.FC<{ tracks: TrackData[]; onPlay: (t: TrackData) =
               <span style={{ color: "#666", fontSize: 12 }}>{sel.trackIds.length} tracks</span>
             </div>
             {selTracks.map(t => (
-              <div key={t.id} className="track-row" onDoubleClick={() => onPlay(t)} draggable onDragStart={() => setDragTrack(t.id)}>
+              <div key={t.id} className="track-row playlist-track-row" onDoubleClick={() => onPlay(t)} draggable onDragStart={() => setDragTrack(t.id)}>
                 <span className="col-title"><IconMusic size={12} style={{ marginRight: 4 }} />{t.title}</span>
                 <span className="col-artist">{t.artist}</span>
                 <span className="col-dur">{formatDuration(t.durationSecs)}</span>

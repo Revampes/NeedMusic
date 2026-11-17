@@ -46,6 +46,7 @@ export interface WebMergedInfo {
   audioRequests: Set<string>;
   ratings: Map<string, number>;
   positions: Map<string, number>;
+  tracks: SyncTrackMeta[];
 }
 
 export interface WebDriveSync {
@@ -227,6 +228,7 @@ export function useWebDriveSync({
     audioRequests: new Set<string>(),
     ratings: new Map<string, number>(),
     positions: new Map<string, number>(),
+    tracks: [],
   }));
   const mergedInfoRef = useRef(mergedInfo);
   mergedInfoRef.current = mergedInfo;
@@ -450,6 +452,7 @@ export function useWebDriveSync({
         audioRequests: new Set(merged.audioRequests ?? []),
         ratings: merged.ratings,
         positions: merged.positions,
+        tracks: merged.tracks ?? [],
       });
 
       // Favorites: pass the full map (incl. fav:false records) so un-favourites

@@ -890,6 +890,7 @@ const App: React.FC = () => {
                    onReclaimDriveSpace={() => { void handleReclaimDriveSpace(); }}
                    reclaimBusy={reclaimBusy}
                    reclaimResult={reclaimResult}
+                   driveItems={driveSync.mergedInfo.tracks.map((t) => ({ songKey: t.songKey, title: t.title, hasAudio: !!t.driveFileId }))}
                  />
                </div>
              ) :

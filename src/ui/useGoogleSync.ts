@@ -89,6 +89,7 @@ declare global {
 }
 
 const ACCOUNT_KEY = "needmusic:gdrive:account";
+const PROFILE_SCOPE = `openid email profile ${SYNC_SCOPE}`;
 
 function readAccount(): DriveAccount | null {
   try { const raw = localStorage.getItem(ACCOUNT_KEY); return raw ? JSON.parse(raw) : null; } catch { return null; }
@@ -96,6 +97,23 @@ function readAccount(): DriveAccount | null {
 function writeAccount(acc: DriveAccount | null): void {
   try { if (acc) localStorage.setItem(ACCOUNT_KEY, JSON.stringify(acc)); else localStorage.removeItem(ACCOUNT_KEY); } catch { /* ignore */ }
 }
+
+async function loadGoogleAccount(accessToken: string): Promise<DriveAccount | null> {
+  try {
+    const response = await fetch("https://www.googleapis.com/oauth2/v3/userinfo", {
+      headers: { Authorization: `Bearer ${accessToken}` },
+    });
+    if (!response.ok) return null;
+    const profile = await response.json();
+    const acc: DriveAccount = {
+      email: profile.email || "",
+      name: profile.name || profile.email || "Google account",
+      picture: profile.picture || "",
+    };
+    return acc;
+  } catch { return null; }
+}
+
 
 export function useGoogleSync({
   ready,
@@ -203,6 +221,7 @@ export function useGoogleSync({
           if (access) {
             cacheToken(access, 3600);
             setToken(access);
+            void loadGoogleAccount(access).then((profile) => { if (profile) { setAccount(profile); writeAccount(profile); } });
             setter({ state: "synced", detail: "Session restored — syncing…", at: new Date().toISOString() });
           }
         } catch { /* expired — user re-signs in */ }
@@ -214,12 +233,13 @@ export function useGoogleSync({
         if (!g?.accounts?.oauth2?.initTokenClient) return;
         const client = g.accounts.oauth2.initTokenClient({
           client_id: getGoogleClientId(),
-          scope: SYNC_SCOPE,
+          scope: PROFILE_SCOPE,
           prompt: "",
           callback: (resp: any) => {
             if (resp?.access_token) {
               cacheToken(resp.access_token, resp.expires_in || 3600);
               setToken(resp.access_token);
+              void loadGoogleAccount(resp.access_token).then((profile) => { if (profile) { setAccount(profile); writeAccount(profile); } });
             }
           },
         });
@@ -353,10 +373,11 @@ export function useGoogleSync({
     if (browserAuth) {
       setter({ state: "authorizing", detail: "Open the browser to authorize…" });
       try {
-        const accessToken = await browserAuth(clientId, SYNC_SCOPE);
+        const accessToken = await browserAuth(clientId, PROFILE_SCOPE);
         if (!accessToken) { setter({ state: "error", detail: "Authorization cancelled or timed out." }); return; }
         cacheToken(accessToken, 3600);
         setToken(accessToken);
+        void loadGoogleAccount(accessToken).then((profile) => { if (profile) { setAccount(profile); writeAccount(profile); } });
         setter({ state: "synced", detail: "Signed in — syncing…", at: new Date().toISOString() });
       } catch (e: any) {
         setter({ state: "error", detail: String(e?.message || e) });
@@ -370,13 +391,14 @@ export function useGoogleSync({
       setter({ state: "authorizing", detail: "Requesting access…" });
       const tokenClient = g.accounts.oauth2.initTokenClient({
         client_id: clientId,
-        scope: SYNC_SCOPE,
+        scope: PROFILE_SCOPE,
         prompt: "",
         callback: (resp: any) => {
           if (resp?.error) { setter({ state: "error", detail: `Google auth error: ${resp.error}` }); return; }
           if (!resp?.access_token) { setter({ state: "error", detail: "No access token returned — did you allow access?" }); return; }
           cacheToken(resp.access_token, resp.expires_in || 3600);
           setToken(resp.access_token);
+          void loadGoogleAccount(resp.access_token).then((profile) => { if (profile) { setAccount(profile); writeAccount(profile); } });
           setter({ state: "synced", detail: "Signed in — syncing…", at: new Date().toISOString() });
           if (resp.id_token) {
             try {

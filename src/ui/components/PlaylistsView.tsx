@@ -166,7 +166,7 @@ const PlaylistsView: React.FC<PlaylistsViewProps> = ({ tracks, onChanged }) => {
               </div>
             ) : (
               playlistTracks.map((t) => (
-                <div key={t.id} className="track-row" onDoubleClick={() => handlePlayTrack(t)}>
+                <div key={t.id} className="track-row playlist-track-row" onDoubleClick={() => handlePlayTrack(t)}>
                   <span className="col-title">{t.title}</span>
                   <span className="col-artist">{t.artist}</span>
                   <span className="col-dur">{t.formatDuration()}</span>
@@ -179,7 +179,7 @@ const PlaylistsView: React.FC<PlaylistsViewProps> = ({ tracks, onChanged }) => {
                 Add from Library
               </div>
               {tracks.slice(0, 20).map((t) => (
-                <div key={t.id} className="track-row" style={{ opacity: playlistTracks.some((pt) => pt.id === t.id) ? 0.4 : 1 }}>
+                <div key={t.id} className="track-row playlist-track-row" style={{ opacity: playlistTracks.some((pt) => pt.id === t.id) ? 0.4 : 1 }}>
                   <span className="col-title">{t.title}</span>
                   <span className="col-artist">{t.artist}</span>
                   <span

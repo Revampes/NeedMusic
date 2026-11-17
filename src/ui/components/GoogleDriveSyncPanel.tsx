@@ -4,7 +4,7 @@
  * variables. Mirrors the web panel's behaviour (sign-in, account, status).
  */
 
-import React from "react";
+import React, { useEffect, useState } from "react";
 import type { AudioMode } from "@core/services/cloudsync";
 
 export interface GoogleSyncPanelProps {
@@ -13,6 +13,7 @@ export interface GoogleSyncPanelProps {
   status: {
     state: string;
     detail?: string;
+    at?: string;
   };
   hasConfig: boolean;
   onSignIn: () => void;
@@ -28,6 +29,7 @@ export interface GoogleSyncPanelProps {
   onReclaimDriveSpace?: () => void;
   reclaimBusy?: boolean;
   reclaimResult?: string | null;
+  driveItems?: { songKey: string; title: string; hasAudio: boolean }[];
 }
 
 function statusText(status: GoogleSyncPanelProps["status"]): string {
@@ -58,11 +60,23 @@ const GoogleDriveSyncPanel: React.FC<GoogleSyncPanelProps> = ({
   onReclaimDriveSpace,
   reclaimBusy = false,
   reclaimResult = null,
+  driveItems = [],
 }) => {
   const busy = status.state === "authorizing" || status.state === "syncing";
   const error = status.state === "error";
   const synced = status.state === "synced";
   const accentColor = synced ? "var(--color-success)" : error ? "var(--color-error)" : "var(--text-tertiary)";
+  const [developerMode, setDeveloperMode] = useState(() => localStorage.getItem("needmusic:developerMode") === "true");
+  const [countdown, setCountdown] = useState(20);
+  useEffect(() => {
+    const tick = () => {
+      const last = status.state === "synced" && status.at ? Date.parse(status.at) : Date.now();
+      setCountdown(Math.max(0, Math.ceil((last + 20_000 - Date.now()) / 1000)));
+    };
+    tick();
+    const id = window.setInterval(tick, 1000);
+    return () => window.clearInterval(id);
+  }, [status]);
 
   return (
     <section>
@@ -89,6 +103,15 @@ const GoogleDriveSyncPanel: React.FC<GoogleSyncPanelProps> = ({
           {status.detail}
         </div>
       )}
+      {signedIn && <p style={{ fontSize: 11, color: "var(--text-tertiary)", margin: "0 0 10px" }}>Next automatic sync in {countdown}s</p>}
+      <label style={{ display: "inline-flex", alignItems: "center", gap: 7, fontSize: 11, color: "var(--text-secondary)", marginBottom: 10 }}>
+        <input type="checkbox" checked={developerMode} onChange={(e) => { const v = e.target.checked; setDeveloperMode(v); localStorage.setItem("needmusic:developerMode", String(v)); }} /> Developer mode
+      </label>
+      {developerMode && <div style={{ maxHeight: 220, overflow: "auto", fontSize: 10, marginBottom: 12, padding: 8, border: "1px solid var(--glass-border)", borderRadius: 6 }}>
+        <strong>Drive sync items ({driveItems.length})</strong>
+        {driveItems.map((item) => <div key={item.songKey} style={{ display: "flex", justifyContent: "space-between", gap: 8, padding: "3px 0" }}><span title={item.songKey}>{item.title}</span><span>{item.hasAudio ? "Audio + metadata" : "Metadata only"}</span></div>)}
+        {!driveItems.length && <div>No tracks in the latest sync snapshot.</div>}
+      </div>}
 
       {!hasConfig ? (
         <button className="settings-btn" onClick={onOpenGuide} style={{ background: "var(--btn-hover-bg)", color: "var(--text-secondary)", border: "1px solid var(--glass-border-strong)" }}>
