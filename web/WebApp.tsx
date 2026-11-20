@@ -250,6 +250,7 @@ function isMp4FamilyTrack(td: TrackData, knownFormats: ReadonlyMap<string, strin
 }
 
 const WebApp: React.FC = () => {
+  const RENDER_SERVER_URL = "https://needmusic.onrender.com";
   const bgCanvasRef = useRef<HTMLCanvasElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const [ready, setReady] = useState(false);
@@ -275,10 +276,9 @@ const WebApp: React.FC = () => {
   // without the desktop LAN server. Optional; LAN is the built-in fallback.
   const [cloudUrl, setCloudUrl] = useState(() => {
     try {
-      const fromQuery = new URLSearchParams(window.location.search).get("cloud");
-      if (fromQuery) { localStorage.setItem("needmusic:cloudUrl", fromQuery); return fromQuery; }
-      return localStorage.getItem("needmusic:cloudUrl") || "";
-    } catch { return ""; }
+      localStorage.setItem("needmusic:cloudUrl", RENDER_SERVER_URL);
+    } catch { /* localStorage may be unavailable */ }
+    return RENDER_SERVER_URL;
   });
   const [lanStatus, setLanStatus] = useState<string | null>(null);
   const [playError, setPlayError] = useState<string | null>(null);
@@ -1706,6 +1706,7 @@ const NowPlayingSheet: React.FC<{
           <button className={`ctrl-btn ${player.isFavorite ? "active" : ""}`} onClick={onToggleFav} title={player.isFavorite ? "Unfavorite" : "Favorite"}>
             {player.isFavorite ? <IconHeartFill size={20} /> : <IconHeart size={20} />}
           </button>
+          <button className="ctrl-btn" onClick={() => engine.stop()} title="Stop"><IconStop size={20} /></button>
           <select className="speed-select" value={player.playbackRate} onChange={(e) => onSetRate(Number(e.target.value))} title={`Speed: ${player.playbackRate}x`}>
             {SPEED_OPTIONS.map((s) => (<option key={s} value={s}>{s}x</option>))}
           </select>
@@ -1868,7 +1869,6 @@ const WebSettingsView: React.FC<{
   const [lanBusy, setLanBusy] = useState(false);
   const [diag, setDiag] = useState<string | null>(null);
   const [diagBusy, setDiagBusy] = useState(false);
-  const [cloudInput, setCloudInput] = useState(cloudUrl);
   const [cloudBusy, setCloudBusy] = useState(false);
   const [cloudStatus, setCloudStatus] = useState<string | null>(null);
 
@@ -1888,14 +1888,6 @@ const WebSettingsView: React.FC<{
     } finally {
       setCloudBusy(false);
     }
-  };
-
-  const saveCloud = async () => {
-    const u = cloudInput.trim().replace(/\/+$/, "");
-    if (!u) { onCloudChange(""); setCloudStatus("Cloud search disabled."); return; }
-    const ok = await testCloud(u);
-    if (ok) onCloudChange(ok);
-    else onCloudChange("");
   };
 
   /** Run a step-by-step connectivity test so failures are exact, not vague. */
@@ -1981,32 +1973,18 @@ const WebSettingsView: React.FC<{
       {/* ── Cloud Search (Render) ── */}
       <div style={{ padding: "4px 0 16px", borderBottom: "1px solid var(--glass-border, rgba(255,255,255,0.08))", marginBottom: 12 }}>
         <h4 style={{ marginBottom: 8, fontSize: 16 }}>☁️ Cloud Search</h4>
-        <div style={{ display: "flex", gap: 8, marginBottom: 8, alignItems: "center" }}>
-          <input
-            value={cloudInput}
-            onChange={(e) => setCloudInput(e.target.value)}
-            placeholder="https://your-app.onrender.com"
-            inputMode="url"
-            style={{ flex: 1, padding: "10px 12px", background: "#1a1a1a", border: "1px solid #333", color: "#e0e0e0", borderRadius: 6, fontSize: 16 }}
-          />
-          <button
-            onClick={saveCloud}
-            disabled={cloudBusy}
-            style={{ padding: "10px 16px", background: cloudUrl ? "#333" : "#2f6fed", color: "#fff", border: "none", borderRadius: 6, cursor: "pointer", fontSize: 15 }}
-          >
-            {cloudBusy ? "…" : cloudUrl ? "Update" : "Enable"}
-          </button>
-          {cloudUrl && (
-            <button
-              onClick={() => { setCloudInput(""); onCloudChange(""); setCloudStatus("Cloud search disabled."); }}
-              style={{ padding: "10px 12px", background: "transparent", color: "#e94560", border: "1px solid #e94560", borderRadius: 6, cursor: "pointer", fontSize: 15 }}
-            >
-              Disable
-            </button>
-          )}
-        </div>
+        <p style={{ marginBottom: 8, color: "#bbb", fontSize: 14 }}>
+          Render server: <strong style={{ color: "#4ecdc4" }}>needmusic.onrender.com</strong>
+        </p>
+        <button
+          onClick={() => { setCloudBusy(true); void testCloud(cloudUrl).finally(() => setCloudBusy(false)); }}
+          disabled={cloudBusy}
+          style={{ padding: "10px 16px", background: "#333", color: "#fff", border: "1px solid #555", borderRadius: 6, cursor: "pointer", fontSize: 15 }}
+        >
+          {cloudBusy ? "Testing…" : "Test connection"}
+        </button>
         {cloudStatus && <p style={{ fontSize: 11, color: cloudStatus.includes("✓") ? "#4ecdc4" : cloudStatus.includes("Could not") || cloudStatus.includes("disabled") ? "#e94560" : "#999", marginBottom: 0 }}>{cloudStatus}</p>}
-        {cloudUrl && !cloudStatus && <p style={{ fontSize: 11, color: "#4ecdc4", marginBottom: 0 }}>Cloud search enabled ✓ (Bilibili). See Render deploy steps in the README to host your own.</p>}
+        {!cloudStatus && <p style={{ fontSize: 11, color: "#4ecdc4", marginTop: 8, marginBottom: 0 }}>Cloud search is enabled automatically.</p>}
       </div>
 
       {/* ── LAN Sync (experimental) ── */}
@@ -2920,6 +2898,45 @@ const mobileStyles = `
   .player-left .ctrl-btn { display: none !important; }
   .ctrl-btn { padding: 12px !important; }
   .play-btn { width: 56px !important; height: 56px !important; }
+}
+
+/* Phone-first visual system: the web player is a compact, touch-oriented
+   surface instead of a scaled-down desktop window. */
+@media (max-width: 600px) {
+  :root { --mobile-gutter: clamp(12px, 4vw, 20px); }
+  body { background: #101014 !important; }
+  .app-wrapper { background: radial-gradient(circle at 50% -20%, #282039 0, #101014 48%) !important; }
+  .app-layout { padding-top: env(safe-area-inset-top) !important; padding-bottom: calc(132px + env(safe-area-inset-bottom)) !important; }
+  .icon-sidebar {
+    padding: 10px var(--mobile-gutter) !important;
+    background: rgba(18,18,24,.9) !important;
+    border-bottom-color: rgba(255,255,255,.06) !important;
+    scrollbar-width: none;
+  }
+  .icon-sidebar::-webkit-scrollbar { display: none; }
+  .icon-nav-item {
+    min-width: clamp(58px, 17vw, 76px) !important;
+    height: clamp(52px, 15vw, 64px) !important;
+    padding: 7px clamp(6px, 2vw, 12px) !important;
+    border-radius: 14px !important;
+  }
+  .icon-nav-item svg { width: clamp(20px, 6vw, 28px) !important; height: clamp(20px, 6vw, 28px) !important; }
+  .nav-label { font-size: clamp(10px, 2.8vw, 12px) !important; }
+  .content-search-bar { padding: 12px var(--mobile-gutter) !important; background: transparent !important; border: 0 !important; }
+  .content-search-bar .search-input { min-height: clamp(44px, 12vw, 52px) !important; font-size: clamp(15px, 4.2vw, 18px) !important; }
+  .filter-select, .lan-chip, .online-search-btn { min-height: clamp(42px, 11vw, 50px) !important; font-size: clamp(12px, 3.5vw, 15px) !important; }
+  .track-summary { margin: 0 var(--mobile-gutter) 8px !important; border-radius: 12px; background: rgba(255,255,255,.04); }
+  .track-row { margin: 6px var(--mobile-gutter) !important; padding: clamp(12px, 4vw, 18px) clamp(10px, 3vw, 16px) !important; border: 1px solid rgba(255,255,255,.05); border-radius: 16px !important; background: rgba(255,255,255,.035); }
+  .col-title { font-size: clamp(14px, 4vw, 17px) !important; }
+  .player-bar { margin: 0 !important; border-top: 1px solid rgba(255,255,255,.1) !important; background: rgba(20,20,27,.96) !important; backdrop-filter: blur(20px) !important; }
+  .player-artwork { width: clamp(46px, 14vw, 58px) !important; height: clamp(46px, 14vw, 58px) !important; }
+  .player-title { font-size: clamp(14px, 4.5vw, 19px) !important; }
+  .player-artist { font-size: clamp(12px, 3.7vw, 16px) !important; }
+  .player-bar-play { width: clamp(50px, 16vw, 64px) !important; height: clamp(50px, 16vw, 64px) !important; }
+  .now-playing-sheet { padding: clamp(18px, 6vw, 32px) var(--mobile-gutter) calc(24px + env(safe-area-inset-bottom)) !important; }
+  .np-artwork { width: min(72vw, 300px) !important; height: min(72vw, 300px) !important; }
+  .np-title { font-size: clamp(20px, 6vw, 28px) !important; }
+  .np-controls .ctrl-btn { min-width: clamp(40px, 12vw, 52px); min-height: clamp(40px, 12vw, 52px); }
 }
 `;
 

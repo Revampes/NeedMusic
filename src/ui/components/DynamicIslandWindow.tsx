@@ -26,7 +26,8 @@ html,body{height:100%;overflow:hidden;background:transparent!important;font-fami
 }
 .dynamic-island {
   width: min(var(--dyn-island-width, 300px), calc(100vw - 8px));
-  background: transparent;
+  background: color-mix(in srgb, var(--dyn-island-bg) calc(var(--dyn-island-opacity) * 100%), transparent);
+  backdrop-filter: blur(var(--dyn-island-blur)) saturate(1.2);
   border: none;
   padding: 14px 16px 12px;
   cursor: default;
