@@ -123,6 +123,12 @@ export class DatabaseManager {
       .execute("ALTER TABLE tracks ADD COLUMN resume_position_secs REAL NOT NULL DEFAULT 0")
       .catch(() => { /* column already exists */ });
     await this.db
+      .execute("ALTER TABLE tracks ADD COLUMN play_count INTEGER NOT NULL DEFAULT 0")
+      .catch(() => { /* column already exists */ });
+    await this.db
+      .execute("ALTER TABLE tracks ADD COLUMN last_played TEXT")
+      .catch(() => { /* column already exists */ });
+    await this.db
       .execute("ALTER TABLE tracks ADD COLUMN online_bvid TEXT")
       .catch(() => { /* column already exists */ });
 
@@ -466,6 +472,35 @@ export class DatabaseManager {
       });
     }
     return map;
+  }
+
+  async recordTrackPlay(trackId: TrackId): Promise<void> {
+    await this.ensureDb();
+    await this.db!.execute(
+      `UPDATE tracks
+       SET play_count = play_count + 1, last_played = datetime('now')
+       WHERE id = $1`,
+      [trackId]
+    );
+  }
+
+  async getTrackListeningHistory(): Promise<Array<{
+    trackId: TrackId;
+    playCount: number;
+    lastPlayed: string | null;
+  }>> {
+    await this.ensureDb();
+    const rows: any[] = await this.db!.select(
+      `SELECT id, play_count, last_played
+       FROM tracks
+       WHERE play_count > 0
+       ORDER BY play_count DESC, last_played DESC`
+    );
+    return rows.map((row) => ({
+      trackId: String(row.id),
+      playCount: Number(row.play_count) || 0,
+      lastPlayed: row.last_played ? String(row.last_played) : null,
+    }));
   }
 
   /**

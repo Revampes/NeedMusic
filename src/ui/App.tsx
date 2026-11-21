@@ -174,6 +174,7 @@ const App: React.FC = () => {
         : null);
     return Promise.all([
       db.recordPlay(),
+      track ? db.recordTrackPlay(track.id) : Promise.resolve(),
       bvid ? db.recordOnlinePlay(bvid) : Promise.resolve(),
     ]).then(() => {
       window.dispatchEvent(new CustomEvent("listeningActivity"));
@@ -951,7 +952,7 @@ const App: React.FC = () => {
             <button className="ctrl-btn" onClick={() => engine.next()} title="Next"><IconNext size={16} /></button>
             <button className="ctrl-btn" onClick={() => engine.stop()} title="Stop"><IconStop size={16} /></button>
           </div>
-          <ProgressBar currentSecs={player.currentTimeSecs} totalSecs={player.durationSecs} onSeek={(s) => engine.seek(s)} />
+          <ProgressBar currentSecs={player.currentTimeSecs} totalSecs={player.durationSecs} trackKey={ct?.id ?? ""} onSeek={(s) => engine.seek(s)} />
         </div>
         <div className="player-right">
           {/* Lyrics toggle (only for Bilibili tracks, which may carry lyrics) */}
@@ -1107,15 +1108,15 @@ const TrackListView: React.FC<{ tracks: Track[]; currentTrack: ITrack | null; on
                 title="Click to edit title"
                 onClick={(e) => { e.stopPropagation(); startEdit(t); }}
               >
-                <span className="multiline-text">{t.title}</span>
+                <MarqueeText className="track-title-marquee" active={currentTrack?.id === t.id}>{t.title}</MarqueeText>
                 {t.isOnlineTrack() && (
                   <span className="track-online-badge" title="Saved without downloading — plays via the source API">Online</span>
                 )}
               </span>
             )}
           </span>
-          <span className="col-artist"><span className="multiline-text">{t.artist}</span></span>
-          <span className="col-album"><span className="multiline-text">{t.album}</span></span>
+          <span className="col-artist"><MarqueeText>{t.artist}</MarqueeText></span>
+          <span className="col-album"><MarqueeText>{t.album}</MarqueeText></span>
           <span className="col-dur">{t.formatDuration()}</span>
           <span
             className={`col-offline ${driveSync?.mergedInfo.audioRequests.has(songKeyOf(t)) ? "on" : ""}`}

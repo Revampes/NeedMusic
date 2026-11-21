@@ -499,18 +499,14 @@ body.nm-dragging .queue-panel-item { cursor: copy; }
 /* ── Progress Bar ─────────────────────────────────── */
 .progress-bar-container{display:flex;align-items:center;gap:var(--space-2);width:100%;max-width:500px}
 .progress-time{font-family:var(--font-mono);font-size:var(--text-xs);color:var(--text-tertiary);width:32px;text-align:center;font-variant-numeric:tabular-nums}
-.progress-track{flex:1;height:4px;background:rgba(255,255,255,.08);border-radius:2px;position:relative;cursor:pointer;transition:height var(--transition-fast)}
-.progress-track:hover{height:6px}
+.progress-track{flex:1;height:4px;background:transparent;border-radius:2px;position:relative;cursor:pointer;transition:none}
 .waveform-track{height:34px;display:flex;align-items:center;overflow:visible}
-.waveform-bars{position:absolute;inset:2px 0;display:flex;align-items:center;justify-content:space-between;gap:2px;pointer-events:none}
-.waveform-bars span{display:block;flex:1;min-width:1px;max-width:5px;border-radius:3px;background:rgba(255,255,255,.22);transition:background .12s ease,transform .12s ease}
+.waveform-bars{position:absolute;inset:2px 0;display:flex;align-items:center;justify-content:space-between;gap:2px;pointer-events:none;background:transparent}
+.waveform-bars span{display:block;flex:1;min-width:1px;max-width:5px;border-radius:3px;background:rgba(255,255,255,.22)}
 .waveform-bars span.is-played{background:var(--accent-primary)}
-.waveform-track:hover .waveform-bars span{transform:scaleY(1.12)}
-.waveform-track .progress-fill{position:absolute;left:0;top:0;bottom:0;background:linear-gradient(90deg,rgba(233,69,96,.18),rgba(255,107,129,.08));pointer-events:none}
-.waveform-preview{position:absolute;top:-30px;transform:translateX(-50%);padding:4px 7px;border-radius:5px;background:#111;color:#fff;font:var(--text-xs) var(--font-mono);white-space:nowrap;pointer-events:none;z-index:2}
+.waveform-track .progress-fill{display:none}
 .progress-fill{height:100%;background:linear-gradient(90deg,var(--accent-primary),var(--accent-hover));border-radius:2px;transition:width .1s linear}
-.progress-thumb{position:absolute;top:50%;width:12px;height:12px;background:var(--text-primary);border-radius:50%;transform:translate(-50%,-50%);opacity:0;transition:opacity var(--transition-fast);box-shadow:0 0 6px var(--accent-glow)}
-.progress-track:hover .progress-thumb{opacity:1}
+.progress-thumb{display:none}
 
 /* ── Queue Panel ──────────────────────────────────── */
 .queue-panel{width:260px;min-width:200px;display:flex;flex-direction:column;border-left:1px solid var(--glass-border);background:var(--glass-bg-color);backdrop-filter:blur(var(--glass-blur)) saturate(var(--glass-saturate))}
@@ -1905,3 +1901,87 @@ html.glass-opacity-100 { --glass-bg-opacity: 0.88; }
 .processing-progress > span { display: block; width: 35%; height: 100%; background: var(--accent-primary); border-radius: inherit; animation: processingProgress 1.4s ease-in-out infinite; }
 @keyframes processingSpin { to { transform: rotate(360deg); } }
 @keyframes processingProgress { from { transform: translateX(-110%); } to { transform: translateX(310%); } }
+
+/* Mobile / narrow-window layout */
+@media (max-width: 768px) {
+  .title-bar { height: 28px; }
+  .app-layout { flex-direction: column; }
+  .icon-sidebar {
+    width: 100%;
+    min-width: 0;
+    height: 52px;
+    flex-direction: row;
+    justify-content: space-around;
+    padding: 4px 6px;
+    border-right: none;
+    border-bottom: 1px solid var(--glass-border);
+  }
+  .icon-nav-item { width: 38px; height: 38px; }
+  .icon-nav-spacer { display: none; }
+  .main-area { width: 100%; }
+  .content-search-bar {
+    justify-content: flex-start;
+    overflow-x: hidden;
+    flex-wrap: nowrap;
+    padding: 6px 8px;
+  }
+  .content-search-bar .filter-select,
+  .content-search-bar .search-input,
+  .content-search-bar .online-search-btn {
+    font-size: 12px;
+  }
+  .content-search-bar .filter-select { max-width: 118px; }
+  .content-search-bar .search-input { min-width: 90px; flex: 1; }
+  .content-search-bar .online-search-btn {
+    white-space: nowrap;
+    padding: 7px 9px;
+  }
+  .track-list-header,
+  .track-row { font-size: 12px; }
+  .track-list-header { margin: 0; }
+  .track-row { min-height: 56px; padding: 6px 8px; }
+  .track-row .col-album,
+  .track-row .col-offline,
+  .track-row .col-add,
+  .track-list-header .col-album,
+  .track-list-header .col-offline,
+  .track-list-header .col-add { display: none; }
+  .track-row .col-title { flex: 1 1 auto; min-width: 0; }
+  .track-row .col-artist { flex: 0 1 38%; max-width: 38%; font-size: 11px; }
+  .track-row .col-dur { width: 44px; font-size: 11px; }
+  .track-row .col-remove { width: 24px; opacity: 1; }
+  .col-fav { width: 30px; }
+  .track-title-text { font-size: 13px; }
+  .track-thumb { display: none; }
+  .marquee-container { font-size: inherit; }
+  .queue-panel { display: none; }
+  .player-bar {
+    min-height: 68px;
+    padding: 6px 8px;
+    gap: 6px;
+  }
+  .player-left { width: 38%; gap: 6px; }
+  .player-artwork { width: 38px; height: 38px; }
+  .player-track-details { max-width: calc(100% - 44px); }
+  .player-title { font-size: 12px; }
+  .player-artist,
+  .player-metadata { font-size: 10px; }
+  .player-right { width: auto; min-width: 62px; }
+  .volume-slider { display: none; }
+  .player-center { align-items: flex-end; }
+  .player-controls { gap: 2px; }
+  .ctrl-btn { width: 28px; height: 28px; padding: 2px; }
+  .ctrl-btn.play-btn { width: 38px; height: 38px; }
+  .progress-bar-container { max-width: 220px; }
+  .progress-time { width: 28px; font-size: 10px; }
+  .online-search-history,
+  .tracks-online-search-heading,
+  .online-search-view > div:first-child {
+    flex-wrap: nowrap;
+  }
+  .online-search-btn,
+  .online-action-btn,
+  .settings-btn {
+    white-space: nowrap;
+  }
+}

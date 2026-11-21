@@ -69,6 +69,11 @@ const QueuePanel: React.FC<QueuePanelProps> = ({ libraryTracks, queueVersion, on
     refresh();
   };
 
+  const handleClearQueue = () => {
+    engine.clearQueue();
+    refresh();
+  };
+
   const handlePlay = (idx: number) => {
     engine.setQueue(engine.queueTracks, idx);
     refresh();
@@ -202,6 +207,13 @@ const QueuePanel: React.FC<QueuePanelProps> = ({ libraryTracks, queueVersion, on
           <div className="queue-header-actions">
             {queue.length > 0 && (
               <>
+                <button
+                  className="queue-loop-btn"
+                  title="Remove all tracks from queue"
+                  onClick={handleClearQueue}
+                >
+                  <IconClose size={12} />
+                </button>
                 <button
                   className={`queue-loop-btn ${looping ? "active" : ""}`}
                   title={looping ? "Looping the queue — tap to turn off" : "Loop the queue"}

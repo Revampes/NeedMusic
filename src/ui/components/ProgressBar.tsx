@@ -1,9 +1,10 @@
-import React, { useMemo, useState } from "react";
+import React, { useMemo } from "react";
 
 interface ProgressBarProps {
   currentSecs: number;
   totalSecs: number;
   onSeek: (secs: number) => void;
+  trackKey?: string;
 }
 
 function fmt(secs: number): string {
@@ -13,13 +14,14 @@ function fmt(secs: number): string {
   return `${m}:${s.toString().padStart(2, "0")}`;
 }
 
-const ProgressBar: React.FC<ProgressBarProps> = ({ currentSecs, totalSecs, onSeek }) => {
+const ProgressBar: React.FC<ProgressBarProps> = ({ currentSecs, totalSecs, onSeek, trackKey = "" }) => {
   const pct = totalSecs > 0 ? (currentSecs / totalSecs) * 100 : 0;
-  const [hoverPct, setHoverPct] = useState<number | null>(null);
   const waveform = useMemo(() => Array.from({ length: 72 }, (_, i) => {
-    const seed = Math.sin(i * 12.9898) * 43758.5453;
+    let hash = 0;
+    for (let j = 0; j < trackKey.length; j++) hash = ((hash * 31) + trackKey.charCodeAt(j)) | 0;
+    const seed = Math.sin((i + 1) * 12.9898 + Math.abs(hash) * 0.001) * 43758.5453;
     return 22 + Math.abs(seed - Math.floor(seed)) * 68;
-  }), []);
+  }), [trackKey]);
 
   const getRatio = (e: React.MouseEvent<HTMLDivElement>) => {
     const rect = e.currentTarget.getBoundingClientRect();
@@ -36,8 +38,6 @@ const ProgressBar: React.FC<ProgressBarProps> = ({ currentSecs, totalSecs, onSee
       <div
         className="progress-track waveform-track"
         onClick={handleClick}
-        onMouseMove={(e) => setHoverPct(getRatio(e) * 100)}
-        onMouseLeave={() => setHoverPct(null)}
         role="slider"
         aria-label="Track progress"
         aria-valuemin={0}
@@ -60,11 +60,6 @@ const ProgressBar: React.FC<ProgressBarProps> = ({ currentSecs, totalSecs, onSee
         </div>
         <div className="progress-fill" style={{ width: `${pct}%` }} />
         <div className="progress-thumb" style={{ left: `${pct}%` }} />
-        {hoverPct !== null && totalSecs > 0 && (
-          <div className="waveform-preview" style={{ left: `${hoverPct}%` }}>
-            {fmt((hoverPct / 100) * totalSecs)}
-          </div>
-        )}
       </div>
       <span className="progress-time">{fmt(totalSecs)}</span>
     </div>
