@@ -568,22 +568,17 @@ async fn write_track_metadata(
 
 // ─── Default Download Directory ──────────────────────────
 
-/// Returns the user's Music\NeedMusic folder as the default download location
-/// for online music (Bilibili, YouTube). Falls back to Desktop\Music.
+/// Returns the NeedMusic folder inside the user's Music folder. Library scans
+/// and online downloads share this fixed location.
 #[tauri::command]
-fn get_default_download_dir() -> Result<String, String> {    // Try Music\NeedMusic first.
-    if let Ok(userprofile) = std::env::var("USERPROFILE") {
-        let music_path = std::path::PathBuf::from(&userprofile)
-            .join("Music")
-            .join("NeedMusic");
-        return Ok(music_path.to_string_lossy().to_string());
-    }
-    // Fallback to Desktop\Music.
-    if let Ok(userprofile) = std::env::var("USERPROFILE") {
-        let fallback = std::path::PathBuf::from(&userprofile).join("Desktop").join("Music");
-        return Ok(fallback.to_string_lossy().to_string());
-    }
-    Err("Cannot determine default download directory".to_string())
+fn get_default_download_dir() -> Result<String, String> {
+    let home = std::env::var_os("USERPROFILE")
+        .or_else(|| std::env::var_os("HOME"))
+        .ok_or_else(|| "Cannot determine the user's home directory".to_string())?;
+    let music_dir = std::path::PathBuf::from(home).join("Music").join("NeedMusic");
+    std::fs::create_dir_all(&music_dir)
+        .map_err(|e| format!("Cannot create the user's Music folder: {e}"))?;
+    Ok(music_dir.to_string_lossy().to_string())
 }
 
 /// Convert saved online audio files (m4a/mp4/webm/opus/…) in a folder to MP3,

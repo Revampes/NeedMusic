@@ -1364,9 +1364,6 @@ const WebApp: React.FC = () => {
           {/* Search bar */}
           {(activeTab === "Tracks") && (
             <div className="content-search-bar">
-              <select className="filter-select" value={sortMode} onChange={(e) => setSortMode(e.target.value)} title="Sort tracks">
-                {SORT_OPTIONS.map((o) => (<option key={o.value} value={o.value}>{o.label}</option>))}
-              </select>
               <input className="search-input" type="text" placeholder="Search online music…" value={searchQuery}
                 onChange={(e) => setSearchQuery(e.target.value)}
                 onKeyDown={(e) => { if (e.key === "Enter") submitOnlineSearch(); }}
@@ -1378,6 +1375,9 @@ const WebApp: React.FC = () => {
                   {searchHistory.map((query) => <button key={query} onClick={() => selectSearchHistory(query)}>{query}</button>)}
                 </div>
               )}
+              <select className="filter-select" value={sortMode} onChange={(e) => setSortMode(e.target.value)} title="Sort tracks">
+                {SORT_OPTIONS.map((o) => (<option key={o.value} value={o.value}>{o.label}</option>))}
+              </select>
               <button
                 className={`lan-chip ${lanChip.cls}`}
                 onClick={() => setActiveTab("Settings")}
@@ -2881,10 +2881,10 @@ const mobileStyles = `
   .main-area { width: 100% !important; flex: 1 !important; min-height: 0 !important; }
   .content-area { flex: 1 !important; min-height: 0 !important; }
 
-  /* Search bar: stack filter + input without overflowing */
+  /* Keep search first and the compact sort/filter beside it. */
   .content-search-bar { flex-wrap: wrap !important; gap: 8px !important; padding: 8px 12px !important; }
-  .content-search-bar .search-input { width: 100% !important; min-height: 50px !important; font-size: 17px !important; }
-  .filter-select { padding: 12px !important; font-size: 16px !important; min-height: 50px !important; }
+  .content-search-bar .search-input { flex: 1 1 180px !important; width: auto !important; min-width: 0 !important; height: 44px !important; min-height: 44px !important; font-size: 14px !important; }
+  .content-search-bar .filter-select { flex: 0 0 auto !important; height: 44px !important; min-height: 44px !important; padding: 5px 9px !important; font-size: 12px !important; }
   .lan-chip, .online-search-btn { min-height: 46px !important; padding: 12px 16px !important; font-size: 14px !important; }
 
   /* Compact Spotify-style bar pinned to the bottom: info left, one play
@@ -3020,8 +3020,8 @@ const mobileStyles = `
     background: transparent !important;
     border: 0 !important;
   }
-  .content-search-bar .search-input { flex: 1 0 100% !important; width: 100% !important; min-width: 0 !important; min-height: 46px !important; height: 46px !important; font-size: 15px !important; padding: 9px 12px !important; }
-  .content-search-bar .filter-select { display: none !important; }
+  .content-search-bar .search-input { flex: 1 1 180px !important; width: auto !important; min-width: 0 !important; min-height: 42px !important; height: 42px !important; font-size: 13px !important; padding: 8px 11px !important; }
+  .content-search-bar .filter-select { display: block !important; width: auto !important; max-width: 120px !important; height: 42px !important; min-height: 42px !important; padding: 5px 7px !important; font-size: 10px !important; }
   .content-search-bar .lan-chip, .content-search-bar .online-search-btn {
     flex: 1 1 0 !important;
     min-width: 0 !important;

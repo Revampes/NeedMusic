@@ -2,7 +2,6 @@ import React, { useCallback, useEffect, useMemo, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import type { Track } from "@core/models/Track";
 import { OnlineMusicService, TrendingMusicItem } from "@core/services/OnlineMusicService";
-import { DatabaseManager } from "@core/services/DatabaseManager";
 import { PlaybackEngine } from "@core/services/PlaybackEngine";
 import { Album } from "@core/models/Album";
 import { Artist } from "@core/models/Artist";
@@ -11,6 +10,7 @@ import {
   IconPlay, IconHeart, IconHeartFill, IconDownload,
 } from "@ui/components/Icons";
 import Heatmap from "@ui/components/Heatmap";
+import MarqueeText from "@ui/components/MarqueeText";
 
 interface HomeViewProps {
   tracks: Track[];
@@ -101,9 +101,7 @@ const HomeView: React.FC<HomeViewProps> = ({ tracks, currentTrack, onPlay, onTra
   const downloadTrending = async (item: TrendingMusicItem) => {
     setTrendingBusy(item.bvid);
     try {
-      const db = DatabaseManager.getInstance();
-      let directory = await db.getSetting("onlineDownloadPath");
-      if (!directory) directory = await invoke<string>("get_default_download_dir");
+      const directory = await invoke<string>("get_default_download_dir");
       await onlineService.saveToLibrary(asOnlineItem(item), directory);
       onTrackSaved();
     } catch (error) {
@@ -198,7 +196,7 @@ const HomeView: React.FC<HomeViewProps> = ({ tracks, currentTrack, onPlay, onTra
             {recommended.slice(0, 20).map((item) => (
               <div key={item.bvid} className="home-trending-row">
                 <div className="hmt-info">
-                  <div className="hmt-title">{item.title}</div>
+                  <MarqueeText className="hmt-title" baseSpeed={42}>{item.title}</MarqueeText>
                   <div className="hmt-artist">{item.owner_name} · {item.view.toLocaleString()} views</div>
                 </div>
                 <div className="hmt-dur">{formatDuration(item.duration)}</div>
@@ -235,7 +233,7 @@ const HomeView: React.FC<HomeViewProps> = ({ tracks, currentTrack, onPlay, onTra
             {trending.slice(0, 10).map((item) => (
               <div key={item.bvid} className="home-trending-row">
                 <div className="hmt-info">
-                  <div className="hmt-title">{item.title}</div>
+                  <MarqueeText className="hmt-title" baseSpeed={42}>{item.title}</MarqueeText>
                   <div className="hmt-artist">{item.owner_name} · {item.view.toLocaleString()} views</div>
                 </div>
                 <div className="hmt-dur">{formatDuration(item.duration)}</div>

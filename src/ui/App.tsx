@@ -853,16 +853,6 @@ const App: React.FC = () => {
           {/* Inline search bar */}
           {activeTab === "Tracks" && (
             <div className="content-search-bar">
-              <select
-                className="filter-select"
-                value={sortMode}
-                onChange={(e) => setSortMode(e.target.value)}
-                title="Sort tracks"
-              >
-                {SORT_OPTIONS.map((o) => (
-                  <option key={o.value} value={o.value}>{o.label}</option>
-                ))}
-              </select>
               <input
                 className="search-input"
                 type="text"
@@ -879,6 +869,17 @@ const App: React.FC = () => {
                   {searchHistory.map((query) => <button key={query} onClick={() => selectSearchHistory(query)}>{query}</button>)}
                 </div>
               )}
+              <select
+                className="filter-select"
+                value={sortMode}
+                onChange={(e) => setSortMode(e.target.value)}
+                title="Sort tracks"
+                aria-label="Sort tracks"
+              >
+                {SORT_OPTIONS.map((o) => (
+                  <option key={o.value} value={o.value}>{o.label}</option>
+                ))}
+              </select>
             </div>
           )}
           <div className="content-area">

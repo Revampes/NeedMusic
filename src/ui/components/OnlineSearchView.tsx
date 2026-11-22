@@ -74,15 +74,9 @@ const OnlineSearchView: React.FC<OnlineSearchViewProps> = ({ onTrackSaved, onPro
       const ytVal = await db.getSetting("youtubeSearch");
       setYoutubeEnabled(ytVal === "true");
 
-      // Load download path: custom setting → system default
-      let dir = await db.getSetting("onlineDownloadPath");
-      if (!dir) {
-        try {
-          dir = await invoke<string>("get_default_download_dir");
-        } catch {
-          dir = ""; // Will show error on download attempt
-        }
-      }
+      // All online downloads go to the fixed Music/NeedMusic folder.
+      let dir = "";
+      try { dir = await invoke<string>("get_default_download_dir"); } catch { /* show error on download attempt */ }
       setDownloadDir(dir || "");
 
       // Load view mode preference

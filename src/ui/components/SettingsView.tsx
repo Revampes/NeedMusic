@@ -22,7 +22,6 @@ interface CacheInfo {
 }
 
 const DEFAULTS: Settings = {
-  autoScan: "false", autoScanPath: "", scanFolderPath: "",
   crossfade: "0", gapless: "true",
   blurIntensity: "14", panelOpacity: "50", themeAccent: "#e94560", backgroundStyle: "dark",
   // Custom style
@@ -38,7 +37,6 @@ const DEFAULTS: Settings = {
   maxCacheMb: "500",
   // Online Search
   youtubeSearch: "false",
-  onlineDownloadPath: "",
 };
 
 const BACKGROUND_STYLES = [
@@ -67,14 +65,13 @@ function applyAccentColor(color: string): void {
 
 const SettingsView: React.FC<Props> = ({ onTracksLoaded }) => {
   const [settings, setSettings] = useState<Settings>(DEFAULTS);
-  const [scanPath, setScanPath] = useState("");
+  const [musicPath, setMusicPath] = useState("");
   const [scanning, setScanning] = useState(false);
   const [scanResult, setScanResult] = useState<{ type: "success" | "error" | "debug"; text: string } | null>(null);
   const [debugScanning, setDebugScanning] = useState(false);
   const [cacheInfo, setCacheInfo] = useState<CacheInfo | null>(null);
   const [clearingCache, setClearingCache] = useState(false);
   const [ytDlpAvailable, setYtDlpAvailable] = useState(false);
-  const [downloadPath, setDownloadPath] = useState("");
   // LAN Sync (experimental)
   const [lanUrl, setLanUrl] = useState("");
   const [lanBusy, setLanBusy] = useState(false);
@@ -89,7 +86,7 @@ const SettingsView: React.FC<Props> = ({ onTracksLoaded }) => {
     const s = { ...DEFAULTS };
     for (const k of Object.keys(DEFAULTS)) { const v = await db.getSetting(k); if (v !== null) s[k] = v; }
     setSettings(s);
-    const sp = await db.getSetting("scanFolderPath"); if (sp) setScanPath(sp);
+    try { setMusicPath(await invoke<string>("get_default_download_dir")); } catch { setMusicPath(""); }
     // Restore appearance
     applyAllStyles(s);
     // Reflect the LAN server only if it is actually listening (the command
@@ -128,19 +125,6 @@ const SettingsView: React.FC<Props> = ({ onTracksLoaded }) => {
       window.removeEventListener("focus", check);
     };
   }, []);
-
-  // Load download path
-  useEffect(() => {
-    (async () => {
-      let dir = await db.getSetting("onlineDownloadPath");
-      if (!dir) {
-        try {
-          dir = await invoke<string>("get_default_download_dir");
-        } catch { dir = ""; }
-      }
-      setDownloadPath(dir || "");
-    })();
-  }, [db]);
 
   const handleClearCache = useCallback(async () => {
     setClearingCache(true);
@@ -232,21 +216,23 @@ const SettingsView: React.FC<Props> = ({ onTracksLoaded }) => {
   };
 
   const handleScan = useCallback(async () => {
-    if (!scanPath.trim()) return; setScanning(true); setScanResult(null);
+    setScanning(true); setScanResult(null);
     try {
-      const count = await LibraryManager.getInstance().scanDirectory(scanPath.trim());
+      const dir = musicPath || await invoke<string>("get_default_download_dir");
+      setMusicPath(dir);
+      const count = await LibraryManager.getInstance().scanDirectory(dir);
       const all = LibraryManager.getInstance().getAllTracks();
-      setScanResult({ type: "success", text: count > 0 ? `Found ${count} new tracks (${all.length} total)` : "No new tracks found — check the folder contains supported audio files (.mp3, .flac, .m4a, .ogg, .wav, etc.)" });
+      setScanResult({ type: "success", text: count > 0 ? `Found ${count} new tracks (${all.length} total) in Music` : "No new tracks found in your Music folder — it may be empty or already imported." });
       onTracksLoaded(all);
-      await save("scanFolderPath", scanPath.trim());
     } catch (e) { setScanResult({ type: "error", text: String(e) }); }
     setScanning(false);
-  }, [scanPath, onTracksLoaded, save]);
+  }, [musicPath, onTracksLoaded]);
 
   const handleDebugScan = useCallback(async () => {
-    if (!scanPath.trim()) return; setDebugScanning(true); setScanResult(null);
+    setDebugScanning(true); setScanResult(null);
     try {
-      const result = await invoke<{ path: string; exists: boolean; is_dir: boolean; files_found: number; tracks_parsed: number; errors: string[] }>("debug_scan", { path: scanPath.trim() });
+      const dir = musicPath || await invoke<string>("get_default_download_dir");
+      const result = await invoke<{ path: string; exists: boolean; is_dir: boolean; files_found: number; tracks_parsed: number; errors: string[] }>("debug_scan", { path: dir });
       const lines = [
         `Path: ${result.path}`,
         `Exists: ${result.exists}, IsDir: ${result.is_dir}`,
@@ -260,27 +246,14 @@ const SettingsView: React.FC<Props> = ({ onTracksLoaded }) => {
       setScanResult({ type: "debug", text: lines.join("\n") });
     } catch (e) { setScanResult({ type: "error", text: String(e) }); }
     setDebugScanning(false);
-  }, [scanPath]);
-
-  const handleScanDownloads = useCallback(async () => {
-    setScanning(true); setScanResult(null);
-    try {
-      // Always use the actual default download dir, not the stored setting
-      const dir = await invoke<string>("get_default_download_dir");
-      const totalNew = await LibraryManager.getInstance().scanDirectory(dir);
-      const all = LibraryManager.getInstance().getAllTracks();
-      setScanResult({ type: "success", text: totalNew > 0 ? `Found ${totalNew} new tracks (${all.length} total) in ${dir}` : `No new tracks found in ${dir} — all already imported or no supported files.` });
-      onTracksLoaded(all);
-    } catch (e) { setScanResult({ type: "error", text: String(e) }); }
-    setScanning(false);
-  }, [onTracksLoaded]);
+  }, [musicPath]);
 
   const handleConvertToMp3 = useCallback(async () => {
     setConvertBusy(true);
     setConvertResult(null);
     try {
-      const dir = (downloadPath || await invoke<string>("get_default_download_dir")).trim();
-      if (!dir) throw new Error("No download folder configured.");
+      const dir = await invoke<string>("get_default_download_dir");
+      setMusicPath(dir);
       const res = await invoke<{ converted: { old_path: string; new_path: string }[]; errors: string[] }>("convert_saved_audio_to_mp3", { dir });
 
       // 1. Remap each converted file in the DB (FK-safe; survive per-file errors).
@@ -325,42 +298,44 @@ const SettingsView: React.FC<Props> = ({ onTracksLoaded }) => {
     } finally {
       setConvertBusy(false);
     }
-  }, [downloadPath, onTracksLoaded]);
+  }, [onTracksLoaded]);
 
   const styleVal = settings.backgroundStyle || "dark";
 
   return (
-    <div className="settings-view"><h2>Settings</h2>
+    <div className="settings-view">
+      <header className="settings-page-header"><h2>Settings</h2><p>Organize your library, tune playback, and personalize NeedMusic.</p></header>
+      <nav className="settings-category-nav" aria-label="Settings categories">
+        {[["library", "Library"], ["playback", "Playback"], ["shortcuts", "Shortcuts"], ["appearance", "Appearance"], ["connections", "Connections"], ["online", "Online Search"], ["app", "App behavior"], ["startup", "Startup"], ["storage", "Storage"]].map(([id, label]) => (
+          <button key={id} onClick={() => document.getElementById(`settings-${id}`)?.scrollIntoView({ behavior: "smooth", block: "start" })}>{label}</button>
+        ))}
+      </nav>
 
-      <section><h3><IconFolder size={16} style={{ marginRight: 6 }} />Import Music</h3>
-        <div style={{ display:"flex", gap:8, marginTop:8 }}>
-          <input className="settings-input" style={{ flex:1 }} placeholder="Folder path e.g. C:\\Users\\user\\Music" value={scanPath} onChange={e => setScanPath(e.target.value)} onBlur={() => { if (scanPath.trim()) save("scanFolderPath", scanPath.trim()); }} />
-          <button className="settings-btn primary" onClick={handleScan} disabled={scanning}>{scanning ? "Scanning..." : "Scan"}</button>
-          <button className="settings-btn" style={{ background:"var(--btn-hover-bg)",color:"var(--text-secondary)",border:"1px solid var(--glass-border-strong)",fontSize:"11px",padding:"6px 10px" }} onClick={handleDebugScan} disabled={debugScanning}>{debugScanning ? "..." : "Debug"}</button>
+      <section id="settings-library" className="settings-section-wide"><h3><IconFolder size={16} style={{ marginRight: 6 }} />Import Music</h3>
+        <p className="settings-description">Scan the NeedMusic folder inside your Music library. Online downloads are saved in this same location.</p>
+        <div className="settings-fixed-path-card"><span>Fixed Music location</span><code>{musicPath || "Finding your Music folder…"}</code></div>
+        <div className="settings-actions-row">
+          <button className="settings-btn primary" onClick={handleScan} disabled={scanning || !musicPath}>{scanning ? "Scanning Music folder…" : "Scan Music folder"}</button>
+          <details className="settings-diagnostics"><summary>Diagnostics</summary><button className="settings-btn" onClick={handleDebugScan} disabled={debugScanning}>{debugScanning ? "Inspecting…" : "Inspect this folder"}</button></details>
         </div>
         {scanResult && <div style={{ marginTop:6, fontSize:13, display: "flex", alignItems: "flex-start", gap: 4, color: scanResult.type === "success" ? "var(--color-success)" : scanResult.type === "debug" ? "var(--text-secondary)" : "var(--color-error)", whiteSpace: "pre-wrap" }}>{scanResult.type === "success" ? <IconCheck size={14} /> : scanResult.type === "debug" ? <span style={{fontSize:14}}>🔍</span> : <IconAlert size={14} />}{scanResult.text}</div>}
-        <p style={{ marginTop: 6, fontSize: 11, color: "var(--text-tertiary)" }}>Supported: .mp3, .flac, .m4a, .aac, .ogg, .opus, .wav, .wma, .aiff</p>
-        {downloadPath ? (
-          <div style={{ marginTop: 6 }}>
-            <button className="settings-btn" style={{ background:"var(--accent-primary)",color:"#fff",fontSize:"12px" }} onClick={handleScanDownloads} disabled={scanning}>
-              {scanning ? "Scanning..." : "📥 Scan Downloads (Desktop\\Music)"}
-            </button>
-          </div>
-        ) : null}
-        <label className="settings-check"><input type="checkbox" checked={settings.autoScan==="true"} onChange={e => save("autoScan", e.target.checked?"true":"false")} /> Auto-scan on startup</label>
+        <p className="settings-hint">Supported: MP3, FLAC, M4A, AAC, OGG, Opus, WAV, WMA and AIFF. Nested folders are included.</p>
       </section>
 
-      <section><h3><IconVolume size={16} style={{ marginRight: 6 }} />Audio</h3>
+      <section id="settings-playback"><h3><IconVolume size={16} style={{ marginRight: 6 }} />Playback</h3>
+        <p className="settings-description">Control transitions and continuous playback.</p>
         <label className="settings-row"><span>Crossfade (s)</span><input className="settings-input short" type="number" min="0" max="10" step="0.5" value={settings.crossfade} onChange={e => save("crossfade", e.target.value)} /></label>
         <label className="settings-check"><input type="checkbox" checked={settings.gapless==="true"} onChange={e => save("gapless", e.target.checked?"true":"false")} /> Gapless Playback</label>
       </section>
 
       {/* ── Equalizer ── */}
       <section><h3><IconVolume size={16} style={{ marginRight: 6 }} />Equalizer</h3>
+        <p className="settings-description">Adjust frequency bands to shape the sound across your headphones or speakers.</p>
         <EqSettings />
       </section>
 
-      <section><h3><IconPalette size={16} style={{ marginRight: 6 }} />Appearance</h3>
+      <section id="settings-appearance" className="settings-section-wide"><h3><IconPalette size={16} style={{ marginRight: 6 }} />Appearance</h3>
+        <p className="settings-description">Choose a theme, adjust its accent, or create a custom background. Changes apply immediately.</p>
         <label className="settings-row"><span>Theme</span>
           <select className="settings-input" style={{ width:140 }} value={styleVal} onChange={async e => { await save("backgroundStyle", e.target.value); applyStyle(e.target.value); }}>
             {BACKGROUND_STYLES.map(opt => <option key={opt.value} value={opt.value}>{opt.label}</option>)}
@@ -453,7 +428,7 @@ const SettingsView: React.FC<Props> = ({ onTracksLoaded }) => {
       </section>
 
       {/* ── Dynamic Island ── */}
-      <section><h3><IconSettings size={16} style={{ marginRight: 6 }} />Dynamic Island</h3>
+      <section className="settings-section-wide"><h3><IconSettings size={16} style={{ marginRight: 6 }} />Dynamic Island</h3>
         <label className="settings-check">
           <input type="checkbox" checked={settings.dynIslandEnabled === "true"} onChange={async e => {
             const val = e.target.checked ? "true" : "false";
@@ -518,7 +493,7 @@ const SettingsView: React.FC<Props> = ({ onTracksLoaded }) => {
       </section>
 
       {/* ── LAN Sync (experimental) ── */}
-      <section><h3><IconSettings size={16} style={{ marginRight: 6 }} />LAN Sync <span style={{ fontSize:10, color:"var(--text-tertiary)", fontWeight:400 }}>(experimental)</span></h3>
+      <section id="settings-connections" className="settings-section-wide"><h3><IconSettings size={16} style={{ marginRight: 6 }} />Phone Sync (LAN) <span style={{ fontSize:10, color:"var(--text-tertiary)", fontWeight:400 }}>(experimental)</span></h3>
         <p style={{ fontSize:12, color:"var(--text-tertiary)", marginBottom:10, lineHeight:1.5 }}>
           Share your library with the web player on your phone (same Wi-Fi, e.g. Safari on iPhone).
           Start the server, then open the shown address on the phone — it loads the web player
@@ -560,7 +535,7 @@ const SettingsView: React.FC<Props> = ({ onTracksLoaded }) => {
         </button>
       </section>
 
-      <section><h3><IconSettings size={16} style={{ marginRight: 6 }} />Behavior</h3>
+      <section id="settings-app"><h3><IconSettings size={16} style={{ marginRight: 6 }} />App Behavior</h3>
         <label className="settings-check"><input type="checkbox" checked={settings.minimizeToTray==="true"} onChange={e => save("minimizeToTray", e.target.checked?"true":"false")} /> Minimize to tray <span style={{ fontSize:10, color:"var(--text-tertiary)", marginLeft:4 }}>(hides to system tray on minimize)</span></label>
         <label className="settings-check"><input type="checkbox" checked={settings.closeToTray==="true"} onChange={async e => {
           const val = e.target.checked ? "true" : "false";
@@ -588,11 +563,11 @@ const SettingsView: React.FC<Props> = ({ onTracksLoaded }) => {
       </section>
 
       {/* ── Hotkeys ── */}
-      <section><h3><IconSettings size={16} style={{ marginRight: 6 }} />Keyboard Shortcuts</h3>
+      <section id="settings-shortcuts"><h3><IconSettings size={16} style={{ marginRight: 6 }} />Keyboard Shortcuts</h3>
         <HotkeySettings />
       </section>
 
-      <section><h3><IconRocket size={16} style={{ marginRight: 6 }} />Startup</h3>
+      <section id="settings-startup"><h3><IconRocket size={16} style={{ marginRight: 6 }} />Startup</h3>
         <label className="settings-check"><input type="checkbox" checked={settings.autoStart==="true"} onChange={async e => {
           const enable = e.target.checked;
           await save("autoStart", enable ? "true" : "false");
@@ -607,7 +582,7 @@ const SettingsView: React.FC<Props> = ({ onTracksLoaded }) => {
         }} /> Start on login <span style={{ fontSize:10, color:"var(--text-tertiary)", marginLeft:4 }}>(launches when you sign in)</span></label>
       </section>
 
-      <section><h3><IconFolder size={16} style={{ marginRight: 6 }} />Cache</h3>
+      <section id="settings-storage"><h3><IconFolder size={16} style={{ marginRight: 6 }} />Storage & Cache</h3>
         <div style={{ marginTop: 8 }}>
           {cacheInfo ? (
             <div style={{ fontSize: 13, color: "var(--text-secondary)", marginBottom: 8 }}>
@@ -627,34 +602,10 @@ const SettingsView: React.FC<Props> = ({ onTracksLoaded }) => {
       </section>
 
       {/* ── Online Search ── */}
-      <section><h3><IconRocket size={16} style={{ marginRight: 6 }} />Online Search</h3>
-        {/* Download Path */}
-        <label className="settings-row"><span>Download to</span></label>
-        <div style={{ display: "flex", gap: 8, marginTop: 4, marginBottom: 8 }}>
-          <input
-            className="settings-input"
-            style={{ flex: 1, fontSize: 12 }}
-            placeholder="e.g. C:\Users\user\Music\NeedMusic"
-            value={downloadPath}
-            onChange={e => setDownloadPath(e.target.value)}
-            onBlur={() => { if (downloadPath.trim()) save("onlineDownloadPath", downloadPath.trim()); }}
-          />
-          <button
-            className="settings-btn"
-            style={{ fontSize: 11, whiteSpace: "nowrap" }}
-            onClick={async () => {
-              try {
-                const def = await invoke<string>("get_default_download_dir");
-                setDownloadPath(def);
-                await save("onlineDownloadPath", def);
-              } catch { /* ignore */ }
-            }}
-          >
-            Reset Default
-          </button>
-        </div>
-        <div style={{ fontSize: 10, color: "var(--text-tertiary)", marginBottom: 12 }}>
-          Downloaded music from Bilibili & YouTube is saved here. Separate from your import folder.
+      <section id="settings-online" className="settings-section-wide"><h3><IconRocket size={16} style={{ marginRight: 6 }} />Online Search & Downloads</h3>
+        <p className="settings-description">Choose which catalogs appear in search and manage downloaded audio. Downloads use the same fixed folder shown under Import Music.</p>
+        <div className="settings-fixed-path-card"><span>Download location</span><code>{musicPath || "Finding your Music folder…"}</code></div>
+        <div className="settings-hint" style={{ marginBottom: 12 }}>
           MP3 conversion needs ffmpeg — it is downloaded automatically on first use (~80 MB, may take a minute).
         </div>
         <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 12 }}>
