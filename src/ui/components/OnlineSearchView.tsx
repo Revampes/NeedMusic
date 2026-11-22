@@ -38,6 +38,9 @@ const ProxiedCover: React.FC<{ url: string; alt: string }> = ({ url, alt }) => {
 interface OnlineSearchViewProps {
   onTrackSaved: () => void;
   onProcessingChange?: (label: string | null) => void;
+  externalQuery?: string;
+  externalRequest?: number;
+  showSearchInput?: boolean;
 }
 
 const SEARCH_HISTORY_KEY = "needmusic:onlineSearchHistory";
@@ -48,8 +51,8 @@ function readSearchHistory(): string[] {
   } catch { return []; }
 }
 
-const OnlineSearchView: React.FC<OnlineSearchViewProps> = ({ onTrackSaved, onProcessingChange }) => {
-  const [query, setQuery] = useState("");
+const OnlineSearchView: React.FC<OnlineSearchViewProps> = ({ onTrackSaved, onProcessingChange, externalQuery, externalRequest = 0, showSearchInput = true }) => {
+  const [query, setQuery] = useState(externalQuery ?? "");
   const [history, setHistory] = useState<string[]>(readSearchHistory);
   // Merged results from Bilibili + YouTube (no platform separation).
   const [results, setResults] = useState<OnlineSearchItem[]>([]);
@@ -153,6 +156,15 @@ const OnlineSearchView: React.FC<OnlineSearchViewProps> = ({ onTrackSaved, onPro
       setLoading(false);
     }
   }, [query, history, youtubeEnabled, service]);
+
+  const lastExternalRequest = useRef(0);
+  useEffect(() => {
+    if (externalQuery !== undefined) setQuery(externalQuery);
+    if (externalRequest > 0 && externalRequest !== lastExternalRequest.current) {
+      lastExternalRequest.current = externalRequest;
+      void handleSearch(externalQuery ?? "");
+    }
+  }, [externalQuery, externalRequest, handleSearch]);
 
   const handleKeyDown = useCallback(
     (e: React.KeyboardEvent) => {
@@ -347,7 +359,7 @@ const OnlineSearchView: React.FC<OnlineSearchViewProps> = ({ onTrackSaved, onPro
   return (
     <div className="online-search-view">
       {/* Search bar */}
-      <div className="online-search-bar">
+      {showSearchInput && <div className="online-search-bar">
         <input
           className="online-search-input"
           type="text"
@@ -374,7 +386,7 @@ const OnlineSearchView: React.FC<OnlineSearchViewProps> = ({ onTrackSaved, onPro
             {viewMode === "grid" ? "☰ List" : "▦ Grid"}
           </button>
         )}
-      </div>
+      </div>}
 
       {history.length > 0 && (
         <div className="online-search-history" aria-label="Recent searches">

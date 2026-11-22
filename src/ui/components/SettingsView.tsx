@@ -48,6 +48,23 @@ const BACKGROUND_STYLES = [
   { value: "custom", label: "Custom" },
 ];
 
+function applyAccentColor(color: string): void {
+  const match = /^#?([\da-f]{2})([\da-f]{2})([\da-f]{2})$/i.exec(color);
+  if (!match) return;
+  const rgb = match.slice(1).map((part) => parseInt(part, 16));
+  const hover = rgb.map((channel) => Math.round(channel + (255 - channel) * 0.2));
+  const h = document.documentElement;
+  h.style.setProperty("--accent-primary", color);
+  h.style.setProperty("--accent-hover", `rgb(${hover.join(",")})`);
+  h.style.setProperty("--accent-glow", `rgba(${rgb.join(",")},.35)`);
+  h.style.setProperty("--glass-bg-active", `rgba(${rgb.join(",")},.15)`);
+  h.style.setProperty("--bg-accent-pink", color);
+  h.style.setProperty("--bg-warm-pink", `rgb(${hover.join(",")})`);
+  h.style.setProperty("--row-active-bg", `rgba(${rgb.join(",")},.10)`);
+  h.style.setProperty("--row-active-strip", color);
+  h.style.setProperty("--focus-ring", `0 0 0 2px rgba(${rgb.join(",")},.4)`);
+}
+
 const SettingsView: React.FC<Props> = ({ onTracksLoaded }) => {
   const [settings, setSettings] = useState<Settings>(DEFAULTS);
   const [scanPath, setScanPath] = useState("");
@@ -154,7 +171,7 @@ const SettingsView: React.FC<Props> = ({ onTracksLoaded }) => {
     // Blur
     if (s.blurIntensity) h.style.setProperty("--glass-blur", `${s.blurIntensity}px`);
     // Accent
-    if (s.themeAccent) h.style.setProperty("--accent-primary", s.themeAccent);
+    if (s.themeAccent) applyAccentColor(s.themeAccent);
 
     // Custom style
     if (style === "custom") {
@@ -431,7 +448,7 @@ const SettingsView: React.FC<Props> = ({ onTracksLoaded }) => {
         )}
 
         <label className="settings-row"><span>Accent</span>
-          <input type="color" value={settings.themeAccent} onChange={e => { save("themeAccent", e.target.value); document.documentElement.style.setProperty("--accent-primary", e.target.value); notifyIslandStyle({ themeAccent: e.target.value }); }} style={{ width:32, height:28, border:"none", borderRadius:4, cursor:"pointer" }} />
+          <input type="color" value={settings.themeAccent} onChange={e => { save("themeAccent", e.target.value); applyAccentColor(e.target.value); notifyIslandStyle({ themeAccent: e.target.value }); }} style={{ width:32, height:28, border:"none", borderRadius:4, cursor:"pointer" }} />
         </label>
       </section>
 

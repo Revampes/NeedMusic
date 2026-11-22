@@ -73,6 +73,28 @@ const GoogleDriveSyncPanel: React.FC<GoogleSyncPanelProps> = ({
     return () => window.clearInterval(id);
   }, [status]);
 
+  if (!signedIn) {
+    return (
+      <section className="gdrive-login-page">
+        <div className="gdrive-login-content">
+          <div className="gdrive-login-brand"><span aria-hidden>♫</span> NeedMusic</div>
+          <h2>Welcome Back</h2>
+          {error && <div className="gdrive-login-error">{status.detail}</div>}
+          {hasConfig ? (
+            <button className="gdrive-google-button" onClick={onSignIn} disabled={busy}>
+              <span className="gdrive-google-mark" aria-hidden>G</span>
+              {busy ? "Signing in…" : "Sign in with Google"}
+            </button>
+          ) : (
+            <button className="settings-btn" onClick={onOpenGuide}>Configure Google sign-in →</button>
+          )}
+          <p>By signing in, you allow NeedMusic to sync your library data in your private Google Drive app folder.</p>
+          <button className="gdrive-setup-link" onClick={onOpenGuide}>Privacy and sync details</button>
+        </div>
+      </section>
+    );
+  }
+
   return (
     <section>
       <h4 style={{ marginBottom: 12, fontSize: 16 }}>Google Drive Sync</h4>
@@ -94,10 +116,10 @@ const GoogleDriveSyncPanel: React.FC<GoogleSyncPanelProps> = ({
         </div>
       )}
       {signedIn && <p style={{ fontSize: 13, color: "var(--text-tertiary)", margin: "0 0 12px" }}>Next automatic sync in {countdown}s</p>}
-      <label style={{ display: "inline-flex", alignItems: "center", gap: 8, fontSize: 13, marginBottom: 12 }}>
+      {signedIn && <label style={{ display: "inline-flex", alignItems: "center", gap: 8, fontSize: 13, marginBottom: 12 }}>
         <input type="checkbox" checked={developerMode} onChange={(e) => { const v = e.target.checked; setDeveloperMode(v); localStorage.setItem("needmusic:developerMode", String(v)); }} /> Developer mode
-      </label>
-      {developerMode && <div style={{ maxHeight: 260, overflow: "auto", fontSize: 12, marginBottom: 14, padding: 10, border: "1px solid var(--glass-border)", borderRadius: 6 }}>
+      </label>}
+      {signedIn && developerMode && <div style={{ maxHeight: 260, overflow: "auto", fontSize: 12, marginBottom: 14, padding: 10, border: "1px solid var(--glass-border)", borderRadius: 6 }}>
         <strong>Drive sync items ({driveItems.length})</strong>
         {driveItems.map((item) => <div key={item.songKey} style={{ display: "flex", justifyContent: "space-between", gap: 8, padding: "4px 0" }}><span title={item.songKey}>{item.title}</span><span>{item.hasAudio ? "Audio + metadata" : "Metadata only"}</span></div>)}
         {!driveItems.length && <div>No tracks in the latest sync snapshot.</div>}

@@ -32,7 +32,7 @@ import {
   IconLibrary, IconHeart, IconHeartFill, IconPlaylist, IconSettings,
   IconMusic, IconImage, IconPrevious, IconPlay, IconPause, IconNext, IconStop,
   IconRepeatOff, IconRepeat, IconRepeatOne, IconShuffle, IconVolume,
-  IconClock, IconPlus, IconGlobe, IconClose, IconHome,
+  IconClock, IconPlus, IconClose, IconHome,
   IconAlert, IconLogin,
   IconLyrics,
 } from "@ui/components/Icons";
@@ -45,7 +45,6 @@ import "./styles/design-tokens.css";
 import "./styles/global.css";
 
 const SPEED_OPTIONS = [0.5, 0.75, 1.0, 1.25, 1.5, 2.0];
-const FILTERS = ["All", "Title", "Artist", "Album", "Genre"];
 const SORT_OPTIONS = [
   { value: "default", label: "Default order" },
   { value: "title-az", label: "Title A–Z" },
@@ -56,6 +55,11 @@ const SORT_OPTIONS = [
   { value: "duration-desc", label: "Duration (longest)" },
   { value: "date-new", label: "Date added (newest)" },
 ];
+const ONLINE_HISTORY_KEY = "needmusic:onlineSearchHistory";
+function readOnlineHistory(): string[] {
+  try { const value = JSON.parse(localStorage.getItem(ONLINE_HISTORY_KEY) || "[]"); return Array.isArray(value) ? value.filter((q): q is string => typeof q === "string").slice(0, 5) : []; }
+  catch { return []; }
+}
 
 /** Apply a sort mode to a track list (stable for "default"). */
 function sortTracks<T extends { title: string; artist: string; album: string; durationSecs: number; dateAdded: Date | string }>(list: T[], mode: string): T[] {
@@ -84,9 +88,11 @@ const App: React.FC = () => {
   const [tracks, setTracks] = useState<Track[]>([]);
   const [activeTab, setActiveTab] = useState("Home");
   const [onlineSearchOpen, setOnlineSearchOpen] = useState(false);
+  const [onlineSearchRequest, setOnlineSearchRequest] = useState(0);
   const [processingLabel, setProcessingLabel] = useState<string | null>(null);
   const [searchQuery, setSearchQuery] = useState("");
-  const [filterField, setFilterField] = useState("All");
+  const [searchHistory, setSearchHistory] = useState<string[]>(readOnlineHistory);
+  const [searchFocused, setSearchFocused] = useState(false);
   const [sortMode, setSortMode] = useState("default");
   const [queueVersion, setQueueVersion] = useState(0); // bumped on every queue mutation
   const [playlistVersion, setPlaylistVersion] = useState(0); // bumped when playlists/favorites change
@@ -680,21 +686,32 @@ const App: React.FC = () => {
   }, [tracks, playlistVersion]);
 
   const filteredTracks = useMemo(() => {
-    let list = tracks;
-    if (searchQuery.trim()) {
-      const q = searchQuery.toLowerCase();
-      list = tracks.filter((t) => {
-        switch (filterField) {
-          case "Title": return t.title.toLowerCase().includes(q);
-          case "Artist": return t.artist.toLowerCase().includes(q);
-          case "Album": return t.album.toLowerCase().includes(q);
-          case "Genre": return t.genre.toLowerCase().includes(q);
-          default: return t.title.toLowerCase().includes(q) || t.artist.toLowerCase().includes(q) || t.album.toLowerCase().includes(q);
-        }
-      });
+    return sortTracks(tracks, sortMode);
+  }, [tracks, sortMode]);
+
+  const submitOnlineSearch = useCallback(() => {
+    const query = searchQuery.trim();
+    if (query) {
+      const history = [query, ...searchHistory.filter((entry) => entry.toLowerCase() !== query.toLowerCase())].slice(0, 5);
+      setSearchHistory(history);
+      try { localStorage.setItem(ONLINE_HISTORY_KEY, JSON.stringify(history)); } catch { /* optional */ }
     }
-    return sortTracks(list, sortMode);
-  }, [tracks, searchQuery, filterField, sortMode]);
+    setOnlineSearchOpen(true);
+    if (query) setOnlineSearchRequest((n) => n + 1);
+    setSearchFocused(false);
+  }, [searchQuery, searchHistory]);
+
+  const selectSearchHistory = useCallback((query: string) => {
+    setSearchQuery(query);
+    setSearchHistory((current) => {
+      const next = [query, ...current.filter((entry) => entry.toLowerCase() !== query.toLowerCase())].slice(0, 5);
+      try { localStorage.setItem(ONLINE_HISTORY_KEY, JSON.stringify(next)); } catch { /* optional */ }
+      return next;
+    });
+    setOnlineSearchOpen(true);
+    setOnlineSearchRequest((n) => n + 1);
+    setSearchFocused(false);
+  }, []);
 
   const handlePlayTrack = useCallback(async (track: Track) => {
     setPlayError(null);
@@ -824,21 +841,18 @@ const App: React.FC = () => {
           <div className={`icon-nav-item ${activeTab === "Playlists" ? "active" : ""}`} onClick={() => setActiveTab("Playlists")} title="Playlists"><IconPlaylist size={18} /></div>
           <div className="icon-nav-spacer" />
           <div className={`icon-nav-item ${activeTab === "Settings" ? "active" : ""}`} onClick={() => setActiveTab("Settings")} title="Settings"><IconSettings size={18} /></div>
-          <div className={`icon-nav-item ${activeTab === "Drive" ? "active" : ""}`} onClick={() => setActiveTab("Drive")} title="Google Drive Sync"><IconLogin size={18} /></div>
+          <div className={`icon-nav-item ${activeTab === "Drive" ? "active" : ""}`} onClick={() => setActiveTab("Drive")} title={driveSync.account?.email || "Google Drive Sync"}>
+            {driveSync.signedIn
+              ? driveSync.account?.picture
+                ? <img className="gdrive-sidebar-avatar" src={driveSync.account.picture} alt="Google account" referrerPolicy="no-referrer" />
+                : <span className="gdrive-sidebar-avatar-fallback">{driveSync.account?.name?.slice(0, 1) || "G"}</span>
+              : <IconLogin size={18} />}
+          </div>
         </nav>
         <div className="main-area">
           {/* Inline search bar */}
           {activeTab === "Tracks" && (
             <div className="content-search-bar">
-              <select
-                className="filter-select"
-                value={filterField}
-                onChange={(e) => setFilterField(e.target.value)}
-              >
-                {FILTERS.map((f) => (
-                  <option key={f} value={f}>Filter: {f}</option>
-                ))}
-              </select>
               <select
                 className="filter-select"
                 value={sortMode}
@@ -852,17 +866,19 @@ const App: React.FC = () => {
               <input
                 className="search-input"
                 type="text"
-                placeholder="Search..."
+                placeholder="Search online music…"
                 value={searchQuery}
                 onChange={(e) => setSearchQuery(e.target.value)}
+                onKeyDown={(e) => { if (e.key === "Enter") submitOnlineSearch(); }}
+                onFocus={() => setSearchFocused(true)}
+                onBlur={() => window.setTimeout(() => setSearchFocused(false), 140)}
               />
-              <button
-                className="online-search-btn"
-                onClick={() => setOnlineSearchOpen((open) => !open)}
-                title={onlineSearchOpen ? "Close online search" : "Search online music"}
-              >
-                <IconGlobe size={14} /> {onlineSearchOpen ? "Hide Online Search" : "Online Search"}
-              </button>
+              {searchFocused && searchHistory.length > 0 && (
+                <div className="search-history-dropdown" onPointerDown={(e) => e.preventDefault()} onMouseDown={(e) => e.preventDefault()}>
+                  <div className="search-history-title">Recent searches</div>
+                  {searchHistory.map((query) => <button key={query} onClick={() => selectSearchHistory(query)}>{query}</button>)}
+                </div>
+              )}
             </div>
           )}
           <div className="content-area">
@@ -910,6 +926,9 @@ const App: React.FC = () => {
                    <OnlineSearchView
                      onTrackSaved={() => setTracks(LibraryManager.getInstance().getAllTracks())}
                      onProcessingChange={setProcessingLabel}
+                     externalQuery={searchQuery}
+                     externalRequest={onlineSearchRequest}
+                     showSearchInput={false}
                    />
                  </section>
                ) : (

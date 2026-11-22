@@ -1,4 +1,4 @@
-import React, { useEffect, useState, useCallback, useMemo } from "react";
+import React, { useEffect, useState, useCallback, useMemo, useRef } from "react";
 import { DatabaseManager } from "@core/services/DatabaseManager";
 import { PlaybackEngine } from "@core/services/PlaybackEngine";
 import { Track } from "@core/models/Track";
@@ -23,9 +23,12 @@ const PlaylistsView: React.FC<PlaylistsViewProps> = ({ tracks, onChanged }) => {
   const [playlists, setPlaylists] = useState<SavedPlaylist[]>([]);
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [playlistTracks, setPlaylistTracks] = useState<Track[]>([]);
+  const playlistTracksRef = useRef<Track[]>([]);
+  playlistTracksRef.current = playlistTracks;
   const [showCreate, setShowCreate] = useState(false);
   const [newName, setNewName] = useState("");
   const [dragTrackId, setDragTrackId] = useState<string | null>(null);
+  const playlistDragRef = useRef<string | null>(null);
   const [libraryHistory, setLibraryHistory] = useState<Map<string, { playCount: number; lastPlayed: string | null }>>(new Map());
   const db = DatabaseManager.getInstance();
 
@@ -72,6 +75,7 @@ const PlaylistsView: React.FC<PlaylistsViewProps> = ({ tracks, onChanged }) => {
   const handleSelect = useCallback(async (id: string) => {
     setSelectedId(id);
     const pts = await db.getPlaylistTracks(id);
+    playlistTracksRef.current = pts;
     setPlaylistTracks(pts);
   }, [db]);
 
@@ -97,27 +101,45 @@ const PlaylistsView: React.FC<PlaylistsViewProps> = ({ tracks, onChanged }) => {
     onChanged?.();
   }, [db, selectedId, onChanged]);
 
-  const handleTrackDragOver = useCallback((e: React.DragEvent, targetId: string) => {
-    e.preventDefault();
-    if (!dragTrackId || dragTrackId === targetId) return;
-    setPlaylistTracks((current) => {
-      const next = [...current];
-      const from = next.findIndex((t) => t.id === dragTrackId);
-      const to = next.findIndex((t) => t.id === targetId);
-      if (from < 0 || to < 0) return current;
-      const [moved] = next.splice(from, 1);
-      next.splice(to, 0, moved);
-      return next;
-    });
-  }, [dragTrackId]);
+  const reorderPlaylistTrack = useCallback((sourceId: string, targetId: string, afterTarget: boolean) => {
+    if (sourceId === targetId) return;
+    const next = [...playlistTracksRef.current];
+    const from = next.findIndex((track) => track.id === sourceId);
+    const to = next.findIndex((track) => track.id === targetId);
+    if (from < 0 || to < 0 || from === to) return;
+    const [moved] = next.splice(from, 1);
+    const insertAt = Math.max(0, to - (from < to ? 1 : 0) + (afterTarget ? 1 : 0));
+    next.splice(insertAt, 0, moved);
+    playlistTracksRef.current = next;
+    setPlaylistTracks(next);
+  }, []);
 
-  const handleTrackDragEnd = useCallback(async () => {
-    setDragTrackId(null);
-    if (selectedId) {
-      await db.replacePlaylistTracks(selectedId, playlistTracks.map((t) => t.id));
-      onChanged?.();
-    }
-  }, [db, selectedId, playlistTracks, onChanged]);
+  useEffect(() => {
+    const onMove = (event: PointerEvent) => {
+      const sourceId = playlistDragRef.current;
+      if (!sourceId) return;
+      const target = document.elementFromPoint(event.clientX, event.clientY)?.closest<HTMLElement>("[data-playlist-track-id]");
+      const targetId = target?.dataset.playlistTrackId;
+      if (target && targetId) reorderPlaylistTrack(sourceId, targetId, event.clientY > target.getBoundingClientRect().top + target.getBoundingClientRect().height / 2);
+    };
+    const onUp = () => {
+      const sourceId = playlistDragRef.current;
+      if (!sourceId) return;
+      playlistDragRef.current = null;
+      setDragTrackId(null);
+      if (selectedId) {
+        void db.replacePlaylistTracks(selectedId, playlistTracksRef.current.map((track) => track.id)).then(() => onChanged?.());
+      }
+    };
+    window.addEventListener("pointermove", onMove);
+    window.addEventListener("pointerup", onUp);
+    window.addEventListener("pointercancel", onUp);
+    return () => {
+      window.removeEventListener("pointermove", onMove);
+      window.removeEventListener("pointerup", onUp);
+      window.removeEventListener("pointercancel", onUp);
+    };
+  }, [db, onChanged, reorderPlaylistTrack, selectedId]);
 
   const handlePlayAll = useCallback(() => {
     if (playlistTracks.length === 0) return;
@@ -234,13 +256,12 @@ const PlaylistsView: React.FC<PlaylistsViewProps> = ({ tracks, onChanged }) => {
               playlistTracks.map((t) => (
                 <div
                   key={t.id}
-                  className="track-row playlist-track-row"
-                  draggable
-                  onDragStart={() => setDragTrackId(t.id)}
-                  onDragOver={(e) => handleTrackDragOver(e, t.id)}
-                  onDragEnd={() => void handleTrackDragEnd()}
+                  className={`track-row playlist-track-row ${dragTrackId === t.id ? "playlist-dragging" : ""}`}
+                  data-playlist-track-id={t.id}
                   onDoubleClick={() => handlePlayTrack(t)}
+                  title="Drag to change this playlist's playback order"
                 >
+                  <span className="playlist-drag-handle" aria-label="Drag to reorder" onPointerDown={(e) => { e.preventDefault(); playlistDragRef.current = t.id; setDragTrackId(t.id); }} onClick={(e) => e.stopPropagation()} onDoubleClick={(e) => e.stopPropagation()}>⠿</span>
                   <span className="col-title">{t.title}</span>
                   <span className="col-artist">{t.artist}</span>
                   <span className="col-dur">{t.formatDuration()}</span>

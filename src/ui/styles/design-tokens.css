@@ -254,10 +254,10 @@ html.theme-light .search-input:focus { background: rgba(0,0,0,0.06); }
 html.theme-light .settings-input { background: rgba(0,0,0,0.04); border-color: rgba(0,0,0,0.1); }
 html.theme-light .progress-track { background: rgba(0,0,0,0.08); }
 html.theme-light .track-row:hover { background: rgba(0,0,0,0.03); }
-html.theme-light .track-row.active { background: rgba(233, 69, 96, 0.06); }
+html.theme-light .track-row.active { background: var(--row-active-bg); }
 html.theme-light .content-search-bar { background: var(--bg-deep-purple); }
 html.theme-light .queue-panel-item:hover { background: rgba(0,0,0,0.03); }
-html.theme-light .queue-panel-item.current { background: rgba(233,69,96,0.06); }
+html.theme-light .queue-panel-item.current { background: var(--row-active-bg); }
 html.theme-light .icon-sidebar { background: rgba(255,255,255,0.7); }
 html.theme-light .player-bar { background: rgba(255,255,255,0.7); }
 html.theme-light .queue-panel { background: rgba(255,255,255,0.7); }

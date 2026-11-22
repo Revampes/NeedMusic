@@ -28,11 +28,15 @@ import "../src/ui/styles/design-tokens.css";
 import "../src/ui/styles/global.css";
 
 const SPEED_OPTIONS = [0.5, 0.75, 1.0, 1.25, 1.5, 2.0];
-const FILTERS = ["All", "Title", "Artist", "Album", "Genre"];
 
 /** localStorage key + default for the offline download cache budget (MB). */
 const MAX_CACHE_MB_KEY = "needmusic:maxCacheMb";
 const DEFAULT_MAX_CACHE_MB = 500;
+const ONLINE_HISTORY_KEY = "needmusic:onlineSearchHistory";
+function readOnlineHistory(): string[] {
+  try { const value = JSON.parse(localStorage.getItem(ONLINE_HISTORY_KEY) || "[]"); return Array.isArray(value) ? value.filter((q): q is string => typeof q === "string").slice(0, 5) : []; }
+  catch { return []; }
+}
 function readMaxCacheMb(): number {
   try {
     const v = Number(localStorage.getItem(MAX_CACHE_MB_KEY));
@@ -258,8 +262,10 @@ const WebApp: React.FC = () => {
   const [tracks, setTracks] = useState<TrackData[]>([]);
   const [activeTab, setActiveTab] = useState("Tracks");
   const [onlineSearchOpen, setOnlineSearchOpen] = useState(false);
+  const [onlineSearchRequest, setOnlineSearchRequest] = useState(0);
   const [searchQuery, setSearchQuery] = useState("");
-  const [filterField, setFilterField] = useState("All");
+  const [searchHistory, setSearchHistory] = useState<string[]>(readOnlineHistory);
+  const [searchFocused, setSearchFocused] = useState(false);
   const [sortMode, setSortMode] = useState("default");
   const [player, setPlayer] = useState<PlayerState>({
     currentTrack: null, playbackState: PlaybackState.Idle,
@@ -758,21 +764,32 @@ const WebApp: React.FC = () => {
 
   // ── Filter/Search ─────────────────────────────────
   const filteredTracks = useMemo(() => {
-    let list = tracks;
-    if (searchQuery.trim()) {
-      const q = searchQuery.toLowerCase();
-      list = tracks.filter((t) => {
-        switch (filterField) {
-          case "Title": return t.title.toLowerCase().includes(q);
-          case "Artist": return t.artist.toLowerCase().includes(q);
-          case "Album": return t.album.toLowerCase().includes(q);
-          case "Genre": return t.genre.toLowerCase().includes(q);
-          default: return t.title.toLowerCase().includes(q) || t.artist.toLowerCase().includes(q) || t.album.toLowerCase().includes(q);
-        }
-      });
+    return sortTracks(tracks, sortMode);
+  }, [tracks, sortMode]);
+
+  const submitOnlineSearch = useCallback(() => {
+    const query = searchQuery.trim();
+    if (query) {
+      const history = [query, ...searchHistory.filter((entry) => entry.toLowerCase() !== query.toLowerCase())].slice(0, 5);
+      setSearchHistory(history);
+      try { localStorage.setItem(ONLINE_HISTORY_KEY, JSON.stringify(history)); } catch { /* optional */ }
     }
-    return sortTracks(list, sortMode);
-  }, [tracks, searchQuery, filterField, sortMode]);
+    setOnlineSearchOpen(true);
+    if (query) setOnlineSearchRequest((n) => n + 1);
+    setSearchFocused(false);
+  }, [searchQuery, searchHistory]);
+
+  const selectSearchHistory = useCallback((query: string) => {
+    setSearchQuery(query);
+    setSearchHistory((current) => {
+      const next = [query, ...current.filter((entry) => entry.toLowerCase() !== query.toLowerCase())].slice(0, 5);
+      try { localStorage.setItem(ONLINE_HISTORY_KEY, JSON.stringify(next)); } catch { /* optional */ }
+      return next;
+    });
+    setOnlineSearchOpen(true);
+    setOnlineSearchRequest((n) => n + 1);
+    setSearchFocused(false);
+  }, []);
 
   // ── Track availability (for status badges + summary) ──
   // Every track falls into exactly one bucket: saved on this device,
@@ -1321,10 +1338,18 @@ const WebApp: React.FC = () => {
           <div className="icon-nav-spacer" />
           <div className={`icon-nav-item ${activeTab === "Settings" ? "active" : ""}`} onClick={() => setActiveTab("Settings")} title="Settings"><IconSettings size={18} /><span className="nav-label">Settings</span></div>
           {/* Google Drive / login */}
-          <div className={`icon-nav-item ${activeTab === "Login" ? "active" : ""}`} onClick={() => setActiveTab("Login")} title="Google Drive Sync"><IconLogin size={18} /><span className="nav-label">Login</span></div>
+          <div className={`icon-nav-item ${activeTab === "Login" ? "active" : ""}`} onClick={() => setActiveTab("Login")} title={driveSync.account?.email || "Google Drive Sync"}>
+            {driveSync.signedIn
+              ? driveSync.account?.picture
+                ? <img className="gdrive-sidebar-avatar" src={driveSync.account.picture} alt="Google account" referrerPolicy="no-referrer" />
+                : <span className="gdrive-sidebar-avatar-fallback">{driveSync.account?.name?.slice(0, 1) || "G"}</span>
+              : <IconLogin size={18} />}
+            <span className="nav-label">{driveSync.signedIn ? "Account" : "Login"}</span>
+          </div>
           {/* Import button */}
           <div className="icon-nav-item" onClick={() => fileInputRef.current?.click()} title="Import Music">
             <IconUpload size={18} />
+            <span className="nav-label">Upload</span>
           </div>
         </nav>
         <input
@@ -1339,20 +1364,20 @@ const WebApp: React.FC = () => {
           {/* Search bar */}
           {(activeTab === "Tracks") && (
             <div className="content-search-bar">
-              <select className="filter-select" value={filterField} onChange={(e) => setFilterField(e.target.value)}>
-                {FILTERS.map((f) => (<option key={f} value={f}>Filter: {f}</option>))}
-              </select>
               <select className="filter-select" value={sortMode} onChange={(e) => setSortMode(e.target.value)} title="Sort tracks">
                 {SORT_OPTIONS.map((o) => (<option key={o.value} value={o.value}>{o.label}</option>))}
               </select>
-              <input className="search-input" type="text" placeholder="Search..." value={searchQuery} onChange={(e) => setSearchQuery(e.target.value)} />
-              <button
-                className="online-search-btn"
-                onClick={() => setOnlineSearchOpen((open) => !open)}
-                title={onlineSearchOpen ? "Close online search" : "Search online music"}
-              >
-                <IconGlobe size={14} /> {onlineSearchOpen ? "Hide Online Search" : "Online Search"}
-              </button>
+              <input className="search-input" type="text" placeholder="Search online music…" value={searchQuery}
+                onChange={(e) => setSearchQuery(e.target.value)}
+                onKeyDown={(e) => { if (e.key === "Enter") submitOnlineSearch(); }}
+                onFocus={() => setSearchFocused(true)}
+                onBlur={() => window.setTimeout(() => setSearchFocused(false), 140)} />
+              {searchFocused && searchHistory.length > 0 && (
+                <div className="search-history-dropdown" onPointerDown={(e) => e.preventDefault()} onMouseDown={(e) => e.preventDefault()}>
+                  <div className="search-history-title">Recent searches</div>
+                  {searchHistory.map((query) => <button key={query} onClick={() => selectSearchHistory(query)}>{query}</button>)}
+                </div>
+              )}
               <button
                 className={`lan-chip ${lanChip.cls}`}
                 onClick={() => setActiveTab("Settings")}
@@ -1495,6 +1520,9 @@ const WebApp: React.FC = () => {
                       onSave={handleOnlineSave}
                       saveMsg={onlineSaveMsg}
                       onOpenSettings={() => setActiveTab("Settings")}
+                      externalQuery={searchQuery}
+                      externalRequest={onlineSearchRequest}
+                      showSearchInput={false}
                     />
                   </section>
                 ) : (
@@ -2095,8 +2123,11 @@ const WebOnlineSearch: React.FC<{
   onSave: (item: any) => void;
   saveMsg: { ok: boolean; text: string } | null;
   onOpenSettings: () => void;
-}> = ({ cloudUrl, lanUrl, onSave, saveMsg, onOpenSettings }) => {
-  const [q, setQ] = useState("");
+  externalQuery?: string;
+  externalRequest?: number;
+  showSearchInput?: boolean;
+}> = ({ cloudUrl, lanUrl, onSave, saveMsg, onOpenSettings, externalQuery, externalRequest = 0, showSearchInput = true }) => {
+  const [q, setQ] = useState(externalQuery ?? "");
   const [history, setHistory] = useState<string[]>(readWebSearchHistory);
   const [results, setResults] = useState<any[]>([]);
   const [loading, setLoading] = useState(false);
@@ -2172,6 +2203,15 @@ const WebOnlineSearch: React.FC<{
     setLoading(false);
   };
 
+  const lastExternalRequest = useRef(0);
+  useEffect(() => {
+    if (externalQuery !== undefined) setQ(externalQuery);
+    if (externalRequest > 0 && externalRequest !== lastExternalRequest.current) {
+      lastExternalRequest.current = externalRequest;
+      void search(externalQuery ?? "");
+    }
+  }, [externalQuery, externalRequest]);
+
   const play = (item: any) => {
     // Save-then-play: the parent handler downloads the item to this device
     // (cloud for both sources, LAN as fallback), where iOS can play it
@@ -2181,7 +2221,7 @@ const WebOnlineSearch: React.FC<{
 
   return (
     <div className="online-search-view">
-      <div className="online-search-bar">        <input
+      {showSearchInput && <div className="online-search-bar">        <input
           className="online-search-input"
           type="text"
           placeholder={hasCloud || hasLan ? "Search Bilibili + YouTube…" : "Search online music…"}
@@ -2193,7 +2233,7 @@ const WebOnlineSearch: React.FC<{
         <button className="online-search-btn" onClick={search} disabled={loading || !q.trim()}>
           {loading ? "Searching..." : "Search"}
         </button>
-      </div>
+      </div>}
       {history.length > 0 && (
         <div className="online-search-history" aria-label="Recent searches">
           <span>Recent:</span>
@@ -2306,6 +2346,9 @@ const WebPlaylistsView: React.FC<{ tracks: TrackData[]; onPlay: (t: TrackData) =
   const [newName, setNewName] = useState("");
   const [selected, setSelected] = useState<string | null>(null);
   const [dragTrack, setDragTrack] = useState<string | null>(null);
+  const playlistDragRef = useRef<string | null>(null);
+  const playlistsRef = useRef(playlists);
+  playlistsRef.current = playlists;
 
   // Re-read playlists after a LAN sync merges the desktop's playlists in.
   useEffect(() => { setPlaylists(loadPlaylists()); }, [tracks]);
@@ -2339,6 +2382,49 @@ const WebPlaylistsView: React.FC<{ tracks: TrackData[]; onPlay: (t: TrackData) =
   const sel = playlists.find(p => p.id === selected);
   const selTracks = sel ? sel.trackIds.map(id => tracks.find(t => t.id === id)).filter(Boolean) as TrackData[] : [];
 
+  const reorderPlaylistTrack = useCallback((sourceId: string, targetId: string, afterTarget: boolean) => {
+    if (!selected || sourceId === targetId) return;
+    const current = playlistsRef.current;
+    const index = current.findIndex((p) => p.id === selected);
+    if (index < 0) return;
+    const playlist = { ...current[index], trackIds: [...current[index].trackIds] };
+    const from = playlist.trackIds.indexOf(sourceId);
+    const to = playlist.trackIds.indexOf(targetId);
+    if (from < 0 || to < 0 || from === to) return;
+    const [moved] = playlist.trackIds.splice(from, 1);
+    const insertAt = Math.max(0, to - (from < to ? 1 : 0) + (afterTarget ? 1 : 0));
+    playlist.trackIds.splice(insertAt, 0, moved);
+    const next = [...current];
+    next[index] = playlist;
+    playlistsRef.current = next;
+    setPlaylists(next);
+    savePlaylists(next);
+  }, [selected]);
+
+  useEffect(() => {
+    const onMove = (event: PointerEvent) => {
+      const source = playlistDragRef.current;
+      if (!source) return;
+      const target = document.elementFromPoint(event.clientX, event.clientY)?.closest<HTMLElement>("[data-playlist-track-id]");
+      const targetId = target?.dataset.playlistTrackId;
+      if (target && targetId) reorderPlaylistTrack(source, targetId, event.clientY > target.getBoundingClientRect().top + target.getBoundingClientRect().height / 2);
+    };
+    const onUp = () => {
+      if (!playlistDragRef.current) return;
+      playlistDragRef.current = null;
+      setDragTrack(null);
+      if (selected) onChanged?.([selected]);
+    };
+    window.addEventListener("pointermove", onMove);
+    window.addEventListener("pointerup", onUp);
+    window.addEventListener("pointercancel", onUp);
+    return () => {
+      window.removeEventListener("pointermove", onMove);
+      window.removeEventListener("pointerup", onUp);
+      window.removeEventListener("pointercancel", onUp);
+    };
+  }, [reorderPlaylistTrack, selected, onChanged]);
+
   return (
     <div className="web-playlists" style={{ display: "flex", height: "100%" }}>
       <div style={{ width: 200, borderRight: "1px solid #222", padding: 8, overflowY: "auto" }}>
@@ -2364,14 +2450,17 @@ const WebPlaylistsView: React.FC<{ tracks: TrackData[]; onPlay: (t: TrackData) =
               <span style={{ color: "#666", fontSize: 12 }}>{sel.trackIds.length} tracks</span>
             </div>
             {selTracks.map(t => (
-              <div key={t.id} className="track-row playlist-track-row" onDoubleClick={() => onPlay(t)} draggable onDragStart={() => setDragTrack(t.id)}>
+              <div key={t.id} data-playlist-track-id={t.id} className={`track-row playlist-track-row ${dragTrack === t.id ? "playlist-dragging" : ""}`} onDoubleClick={() => onPlay(t)}
+                title="Drag to change this playlist's playback order"
+                onDragOver={(e) => { if (dragTrack) e.preventDefault(); }}>
+                <span className="playlist-drag-handle" aria-label="Drag to reorder" onPointerDown={(e) => { e.preventDefault(); playlistDragRef.current = t.id; setDragTrack(t.id); }} onClick={(e) => e.stopPropagation()} onDoubleClick={(e) => e.stopPropagation()}>⠿</span>
                 <span className="col-title"><IconMusic size={12} style={{ marginRight: 4 }} />{t.title}</span>
                 <span className="col-artist">{t.artist}</span>
                 <span className="col-dur">{formatDuration(t.durationSecs)}</span>
                 <span className="col-remove" onClick={e => { e.stopPropagation(); removeFromPlaylist(sel.id, t.id); }}><IconClose size={12} /></span>
               </div>
             ))}
-            <div onDragOver={e => e.preventDefault()} onDrop={e => { e.preventDefault(); if (dragTrack) addToPlaylist(sel.id, dragTrack); setDragTrack(null); }}
+            <div onDragOver={e => e.preventDefault()} onDrop={e => { e.preventDefault(); const id = e.dataTransfer.getData("text/plain"); if (id && tracks.some((track) => track.id === id)) addToPlaylist(sel.id, id); setDragTrack(null); }}
               style={{ margin: 8, padding: 24, border: "2px dashed #333", borderRadius: 8, textAlign: "center", color: "#555", fontSize: 12 }}>
               Drop tracks here to add
             </div>
@@ -2908,35 +2997,74 @@ const mobileStyles = `
   .app-wrapper { background: radial-gradient(circle at 50% -20%, #282039 0, #101014 48%) !important; }
   .app-layout { padding-top: env(safe-area-inset-top) !important; padding-bottom: calc(132px + env(safe-area-inset-bottom)) !important; }
   .icon-sidebar {
-    padding: 10px var(--mobile-gutter) !important;
+    padding: 6px 8px !important;
     background: rgba(18,18,24,.9) !important;
     border-bottom-color: rgba(255,255,255,.06) !important;
     scrollbar-width: none;
   }
   .icon-sidebar::-webkit-scrollbar { display: none; }
   .icon-nav-item {
-    min-width: clamp(58px, 17vw, 76px) !important;
-    height: clamp(52px, 15vw, 64px) !important;
-    padding: 7px clamp(6px, 2vw, 12px) !important;
-    border-radius: 14px !important;
+    min-width: 0 !important;
+    flex: 1 1 0 !important;
+    height: 46px !important;
+    padding: 4px 3px !important;
+    border-radius: 9px !important;
   }
-  .icon-nav-item svg { width: clamp(20px, 6vw, 28px) !important; height: clamp(20px, 6vw, 28px) !important; }
-  .nav-label { font-size: clamp(10px, 2.8vw, 12px) !important; }
-  .content-search-bar { padding: 12px var(--mobile-gutter) !important; background: transparent !important; border: 0 !important; }
-  .content-search-bar .search-input { min-height: clamp(44px, 12vw, 52px) !important; font-size: clamp(15px, 4.2vw, 18px) !important; }
-  .filter-select, .lan-chip, .online-search-btn { min-height: clamp(42px, 11vw, 50px) !important; font-size: clamp(12px, 3.5vw, 15px) !important; }
+  .icon-nav-item svg { width: 19px !important; height: 19px !important; }
+  .nav-label { font-size: 9px !important; }
+  .content-search-bar {
+    display: flex !important;
+    flex-wrap: wrap !important;
+    gap: 5px !important;
+    padding: 8px 10px !important;
+    background: transparent !important;
+    border: 0 !important;
+  }
+  .content-search-bar .search-input { flex: 1 0 100% !important; width: 100% !important; min-width: 0 !important; min-height: 46px !important; height: 46px !important; font-size: 15px !important; padding: 9px 12px !important; }
+  .content-search-bar .filter-select { display: none !important; }
+  .content-search-bar .lan-chip, .content-search-bar .online-search-btn {
+    flex: 1 1 0 !important;
+    min-width: 0 !important;
+    min-height: 34px !important;
+    padding: 5px 6px !important;
+    justify-content: center !important;
+    font-size: 10px !important;
+    line-height: 1.1 !important;
+    white-space: nowrap !important;
+  }
+  .search-history-dropdown { top: 52px !important; left: 10px !important; width: calc(100% - 20px) !important; }
+  .lan-chip .lan-dot { width: 6px; height: 6px; }
+  .content-search-bar .online-search-btn svg { width: 12px; height: 12px; }
+  .gdrive-sidebar-avatar, .gdrive-sidebar-avatar-fallback { width: 19px !important; height: 19px !important; }
   .track-summary { margin: 0 var(--mobile-gutter) 8px !important; border-radius: 12px; background: rgba(255,255,255,.04); }
-  .track-row { margin: 6px var(--mobile-gutter) !important; padding: clamp(12px, 4vw, 18px) clamp(10px, 3vw, 16px) !important; border: 1px solid rgba(255,255,255,.05); border-radius: 16px !important; background: rgba(255,255,255,.035); }
-  .col-title { font-size: clamp(14px, 4vw, 17px) !important; }
+  .track-row { margin: 4px 10px !important; padding: 9px 8px !important; min-height: 44px !important; font-size: 13px !important; border: 1px solid rgba(255,255,255,.05); border-radius: 10px !important; background: rgba(255,255,255,.035); }
+  .col-title { font-size: 13px !important; white-space: nowrap !important; flex-wrap: nowrap !important; min-width: 0 !important; }
+  .col-title > .marquee-container { flex: 1 1 auto !important; width: 1px; min-width: 0 !important; }
   .player-bar { margin: 0 !important; border-top: 1px solid rgba(255,255,255,.1) !important; background: rgba(20,20,27,.96) !important; backdrop-filter: blur(20px) !important; }
   .player-artwork { width: clamp(46px, 14vw, 58px) !important; height: clamp(46px, 14vw, 58px) !important; }
-  .player-title { font-size: clamp(14px, 4.5vw, 19px) !important; }
-  .player-artist { font-size: clamp(12px, 3.7vw, 16px) !important; }
+  .player-title { font-size: 13px !important; }
+  .player-artist { font-size: 11px !important; }
   .player-bar-play { width: clamp(50px, 16vw, 64px) !important; height: clamp(50px, 16vw, 64px) !important; }
   .now-playing-sheet { padding: clamp(18px, 6vw, 32px) var(--mobile-gutter) calc(24px + env(safe-area-inset-bottom)) !important; }
   .np-artwork { width: min(72vw, 300px) !important; height: min(72vw, 300px) !important; }
   .np-title { font-size: clamp(20px, 6vw, 28px) !important; }
   .np-controls .ctrl-btn { min-width: clamp(40px, 12vw, 52px); min-height: clamp(40px, 12vw, 52px); }
+}
+
+@media (max-width: 600px) {
+  .content-search-bar .online-search-btn { min-width: 0 !important; }
+  .online-search-view { padding: 8px 10px !important; }
+  .online-search-history { gap: 5px !important; flex-wrap: nowrap !important; overflow-x: auto !important; }
+  .online-search-history button { font-size: 10px !important; padding: 4px 7px !important; }
+  .online-result-row { padding: 9px 10px !important; gap: 8px !important; }
+  .online-result-row-title { font-size: 13px !important; }
+  .online-result-row-meta { font-size: 10px !important; }
+  .online-result-row-actions .online-action-btn { min-height: 34px !important; padding: 5px 8px !important; font-size: 11px !important; }
+  .web-playlists .track-row { min-height: 44px !important; font-size: 12px !important; }
+  .web-playlists .col-title { font-size: 12px !important; }
+  .track-summary { font-size: 11px !important; padding: 6px 9px !important; }
+  .track-badge { font-size: 8px !important; padding: 1px 5px !important; }
+  .action-sheet-item { font-size: 14px !important; padding: 13px 18px !important; }
 }
 `;
 

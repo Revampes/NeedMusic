@@ -31,6 +31,7 @@ const MarqueeText: React.FC<MarqueeTextProps> = ({
   const innerRef = useRef<HTMLSpanElement>(null);
   const [overflowPx, setOverflowPx] = useState(0);
   const [hovering, setHovering] = useState(false);
+  const [mobile, setMobile] = useState(false);
 
   const measure = useCallback(() => {
     const container = containerRef.current;
@@ -53,7 +54,15 @@ const MarqueeText: React.FC<MarqueeTextProps> = ({
     return () => ro.disconnect();
   }, [children, measure]);
 
-  const needsMarquee = (hovering || active) && overflowPx > 2;
+  useEffect(() => {
+    const media = window.matchMedia("(hover: none), (max-width: 700px)");
+    const update = () => setMobile(media.matches);
+    update();
+    media.addEventListener?.("change", update);
+    return () => media.removeEventListener?.("change", update);
+  }, []);
+
+  const needsMarquee = (hovering || active || mobile) && overflowPx > 2;
 
   // The slide portion is 60% of the keyframe (15%→75%).
   // Total duration = slideTime / 0.6
@@ -64,6 +73,7 @@ const MarqueeText: React.FC<MarqueeTextProps> = ({
     <div
       ref={containerRef}
       className={`marquee-container ${className ?? ""}`}
+      data-overflow={overflowPx > 2 ? "true" : "false"}
       onMouseEnter={() => setHovering(true)}
       onMouseLeave={() => setHovering(false)}
       onTouchStart={() => setHovering(true)}
@@ -73,9 +83,10 @@ const MarqueeText: React.FC<MarqueeTextProps> = ({
         ref={innerRef}
         className={`marquee-inner ${needsMarquee ? "marquee-active" : ""}`}
         style={
-          needsMarquee
+          overflowPx > 2
             ? {
                 animationDuration: `${totalSecs}s`,
+                ["--marquee-total" as string]: `${totalSecs}s`,
                 ["--marquee-dist" as string]: `-${overflowPx}px`,
               }
             : undefined
